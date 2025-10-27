@@ -5,6 +5,7 @@ import time
 import re
 from datetime import datetime
 
+from jinja2 import Template
 from jsonlines import jsonlines
 from openai import OpenAI
 from tqdm import tqdm
@@ -76,29 +77,8 @@ class OpenAIGenerator:
         return generation_result
 
 
-def create_message(query, passage):
-    return f""""
-    You will be presented with a query and passage, please 
-    extract passage spans which are most relevant to the query.
-
-    Span must be comprehensive: removing the span from the text should make it irrelevant 
-    to the query.
-    Span must be plausible: human reading only this span should be convinced that text is relevant.   
-    Let's read both passage and query, and then carefully consider
-    relevance of each passage part to the query. 
-
-    You may select multiple spans if needed, but ensure that the selected sections do not overlap. 
-    Try not to select entire sentences, but only fine-grained spans.
-    Do not correct or modify the text!
-    Include all grammatical and syntactic errors from the original text, 
-    do not remove senseless spaces or punctuation.
-
-    Return only json_object with key 'spans' and list of selected spans 
-    (text, start, end) as value. 
-    \n
-    Query: {query}
-    Passage: {passage}
-    """
+def create_message(template, query, passage):
+    return template.render(query=query, passage=passage)
 
 
 def task_from_prompt(custom_id, prompt):
@@ -110,8 +90,8 @@ def task_from_prompt(custom_id, prompt):
     }
 
 
-def messages_for_passages(query, passage, openai_api):
-    prompt_str = create_message(query, passage)
+def messages_for_passages(template, query, passage, openai_api):
+    prompt_str = create_message(template, query, passage)
     api_message = openai_api.create_api_call_dict(prompt_str)
     return api_message
 
@@ -126,14 +106,14 @@ def create_batch_fix_name(fix_id, generated_data_dir):
     return f"{generated_data_dir}/{time_str}_batch_{fix_id}.jsonl"
 
 
-def create_batch_file(data_chunk, api, jsonl_filename):
+def create_batch_file(data_chunk, api, jsonl_filename, template):
     """
     Create batch file for a range of ids in a jsonl format, which is suitable for OpenAI API.
     https://platform.openai.com/docs/guides/batch/getting-started
     """
     with jsonlines.open(jsonl_filename, "w") as task_writer:
         for row_id, d in data_chunk.items():
-            message = messages_for_passages(d["query"], d["positive"], api)
+            message = messages_for_passages(template, d["query"], d["positive"], api)
 
             # Create sub-batch
             task = task_from_prompt(f"row_{row_id}", message)
@@ -305,6 +285,8 @@ def get_args():
                         help="TSV file having extracted relevance, just to not generate twice.")
     parser.add_argument('--generate_into_dir', type=str, required=True,
                         help="Dir where output batches and fixes will be.")
+    parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
+                        help="Path to the prompt template file.")
 
     # Generation setting args
     parser.add_argument("--model_name",
@@ -323,17 +305,18 @@ def get_args():
     return parser.parse_args()
 
 
-def generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client):
+def generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client, template):
     if generation_client == 'openai':
-        generate_one_batch_openai(data_chunk, generation_api, jsonl_filename)
+        generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, template)
     else:
-        generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename)
+        generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename, template)
 
 
-def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename):
+def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, template):
     create_batch_file(data_chunk,
                       generation_api,
-                      jsonl_filename
+                      jsonl_filename,
+                      template
                       )
     batch_id = create_batch_job(jsonl_filename)
     download_output_batch(batch_id)
@@ -342,10 +325,10 @@ def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename):
                         description="Waiting before sending new batch file.")
 
 
-def generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename):
+def generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename, template):
     responses = []
     for row_id, d in tqdm(data_chunk.items(), desc="Generating batch"):
-        response = generation_api(create_message(d["q_text"], d["psg_text"]))
+        response = generation_api(create_message(template, d["q_text"], d["psg_text"]))
         choice = dict(response.choices[0])
         choice['message'] = dict(choice['message'])
         responses.append(
@@ -363,21 +346,21 @@ def generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename):
         writer.write_all(responses)
 
 
-def generate_all_batches(data_chunks, generation_api, generated_data_dir, generation_client):
+def generate_all_batches(data_chunks, generation_api, generated_data_dir, generation_client, template):
     for data_chunk in data_chunks:
         loop_from = list(data_chunk.keys())[0]
         loop_to = list(data_chunk.keys())[-1]
         print(f"Processing {loop_from} to {loop_to}")
         jsonl_filename = create_batch_name(loop_from, loop_to, generated_data_dir)
 
-        generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client)
+        generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client, template)
 
 
-def generate_all_batches_fix(data_chunks, generation_api, generated_data_dir, generation_client):
+def generate_all_batches_fix(data_chunks, generation_api, generated_data_dir, generation_client, template):
     for fix_id, data_chunk in enumerate(data_chunks):
         print(f"Creating {fix_id} fix batch file.")
         jsonl_filename = create_batch_fix_name(fix_id, generated_data_dir)
-        generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client)
+        generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client, template)
 
 
 def write_output(responses_out, output_data_file, input_data, from_sample):
@@ -531,6 +514,9 @@ def main():
     else:
         generation_api = None
 
+    with open(args.template_file, 'r') as f:
+        template = Template(f.read())
+
     # Read input data
     input_data = read_input_data(args.input_data_name, args.from_sample, args.to_sample)
     already_generated = load_already_generated(args.input_generated_relevance)
@@ -546,7 +532,8 @@ def main():
         generate_all_batches(data_chunks,
                              generation_api,
                              generated_data_dir,
-                             args.generation_client
+                             args.generation_client,
+                             template
                              )
 
     responses_out = get_all_responses(generated_data_dir)
@@ -588,7 +575,8 @@ def main():
         generate_all_batches_fix(invalid_data_chunks,
                                  generation_api,
                                  fix_data_dir,
-                                 args.generation_client
+                                 args.generation_client,
+                                 template
                                  )
 
         # Update final output file with generated fixes
