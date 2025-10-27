@@ -4,6 +4,7 @@ import os
 import time
 import re
 from datetime import datetime
+from os.path import exists
 
 from jinja2 import Template
 from jsonlines import jsonlines
@@ -283,7 +284,7 @@ def get_args():
                         help="Filename to generate relevance extraction data.")
     parser.add_argument('--input_generated_relevance', type=str, required=False, default=None,
                         help="TSV file having extracted relevance, just to not generate twice.")
-    parser.add_argument('--generate_into_dir', type=str, required=True,
+    parser.add_argument('--generate_into_dir', type=str, default="generated",
                         help="Dir where output batches and fixes will be.")
     parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
                         help="Path to the prompt template file.")
@@ -507,6 +508,10 @@ def create_batched_input(input_data, already_generated, generated_ids, from_samp
     return data_chunks
 
 
+def sanitize_model_name(model_name):
+    return model_name.replace('/', '~')
+
+
 def main():
     args = get_args()
 
@@ -524,7 +529,8 @@ def main():
     already_generated = load_already_generated(args.input_generated_relevance)
 
     # Prepare out data file
-    batch_dir = f"{args.model_name.replace('google/', 'google~')}_from{args.from_sample}-to{args.to_sample}"
+    model_name = sanitize_model_name(args.model_name)
+    batch_dir = f"{model_name}_from{args.from_sample}-to{args.to_sample}"
     generated_data_dir = os.path.join(args.generate_into_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
@@ -541,7 +547,9 @@ def main():
     responses_out = get_all_responses(generated_data_dir)
 
     # Remove file if exists
-    output_data_file = f"data/extracted_relevancy_outs/{batch_dir}.jsonl"
+    output_data_file = f"data/extracted_relevancy/{batch_dir}.jsonl"
+    os.makedirs(os.path.dirname(output_data_file), exist_ok=True)
+
     print(f"Saving output data to {output_data_file}")
     write_output(responses_out, output_data_file, input_data, args.from_sample)
 
@@ -562,7 +570,8 @@ def main():
     invalid_samples_history = []
     max_regenerate_count = 5
     while (not args.skip_generation
-           and (invalid_len := len(invalid_samples := find_invalid_samples(output_data_file, invalid_samples, args.psg_key))) > 0):
+           and (invalid_len := len(
+                invalid_samples := find_invalid_samples(output_data_file, invalid_samples, args.psg_key))) > 0):
         print(f"Version after {last_fix} fixes has {invalid_len} invalid samples. "
               f"Trying to fix following indexes.")
         print(invalid_samples)
