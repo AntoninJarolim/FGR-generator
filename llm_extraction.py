@@ -4,7 +4,6 @@ import os
 import time
 import re
 from datetime import datetime
-from os.path import exists
 
 from jinja2 import Template
 from jsonlines import jsonlines
@@ -193,12 +192,19 @@ def sleep_with_progress(seconds, description=None):
 
 
 def read_input_data(file_path, from_sample, to_sample):
-    with jsonlines.open(file_path, 'r') as f:
-        return [
-            line_obj
-            for line_id, line_obj in enumerate(f)
-            if from_sample <= line_id < to_sample
-        ]
+    if file_path.endswith('.jsonl'):
+        with jsonlines.open(file_path, 'r') as f:
+            return [
+                line_obj
+                for line_id, line_obj in enumerate(f)
+                if from_sample <= line_id < to_sample
+            ]
+    elif file_path.endswith('.json'):
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            return data[from_sample:to_sample]
+    else:
+        raise ValueError("Unsupported file format. Please use .json or .jsonl")
 
 
 def silent_remove(output_data_file):
@@ -297,7 +303,7 @@ def get_args():
                         help="model to use for generation, also used to select folder to process")
     parser.add_argument("--from_sample", type=int, default=0,
                         help="The starting index of the data samples to process.")
-    parser.add_argument("--to_sample", type=int, default=30,
+    parser.add_argument("--to_sample", type=int, default=-1,
                         help="The ending index of the data samples to process.")
     parser.add_argument("--batch_size", type=int, default=15,
                         help="The number of samples to process in each batch.")
@@ -532,7 +538,7 @@ def main():
 
     # Prepare out data file
     model_name = sanitize_model_name(args.model_name)
-    batch_dir = f"{model_name}_from{args.from_sample}-to{args.to_sample}"
+    batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
