@@ -1,0 +1,23 @@
+
+    You will be presented with a query and passage, please 
+    extract passage spans which are most relevant to the query.
+
+    Span must be comprehensive: removing the span from the text should make it irrelevant 
+    to the query.
+    Span must be plausible: human reading only this span should be convinced that text is relevant.   
+    Let's read both passage and query, and then carefully consider
+    relevance of each passage part to the query. 
+
+    You may select multiple spans if needed, but ensure that the selected sections do not overlap. 
+    Try not to select entire sentences, but only fine-grained spans.
+    Do not correct or modify the text!
+    Include all grammatical and syntactic errors from the original text, 
+    do not remove senseless spaces or punctuation.
+
+    Return only json_object with key 'spans' and list of selected spans 
+    (text, start, end) as value. 
+    
+
+    Query: {{query}}
+    Passage: {{passage}}
+    

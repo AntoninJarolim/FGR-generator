@@ -77,8 +77,8 @@ class OpenAIGenerator:
         return generation_result
 
 
-def create_message(template, query, passage):
-    return template.render(query=query, passage=passage)
+def create_message(template, **kwargs):
+    return template.render(**kwargs)
 
 
 def task_from_prompt(custom_id, prompt):
@@ -90,8 +90,8 @@ def task_from_prompt(custom_id, prompt):
     }
 
 
-def messages_for_passages(template, query, passage, openai_api):
-    prompt_str = create_message(template, query, passage)
+def messages_for_passages(template, openai_api, **kwargs):
+    prompt_str = create_message(template, **kwargs)
     api_message = openai_api.create_api_call_dict(prompt_str)
     return api_message
 
@@ -112,8 +112,8 @@ def create_batch_file(data_chunk, api, jsonl_filename, template):
     https://platform.openai.com/docs/guides/batch/getting-started
     """
     with jsonlines.open(jsonl_filename, "w") as task_writer:
-        for row_id, d in data_chunk.items():
-            message = messages_for_passages(template, d["query"], d["positive"], api)
+        for row_id, record in data_chunk.items():
+            message = messages_for_passages(template, api, **record)
 
             # Create sub-batch
             task = task_from_prompt(f"row_{row_id}", message)
@@ -327,8 +327,8 @@ def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, templa
 
 def generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename, template):
     responses = []
-    for row_id, d in tqdm(data_chunk.items(), desc="Generating batch"):
-        response = generation_api(create_message(template, d["q_text"], d["psg_text"]))
+    for row_id, record in tqdm(data_chunk.items(), desc="Generating batch"):
+        response = generation_api(create_message(template, **record))
         choice = dict(response.choices[0])
         choice['message'] = dict(choice['message'])
         responses.append(
