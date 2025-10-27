@@ -285,7 +285,7 @@ def get_args():
     parser.add_argument('--input_generated_relevance', type=str, required=False, default=None,
                         help="TSV file having extracted relevance, just to not generate twice.")
     parser.add_argument('--generate_into_dir', type=str, default="generated",
-                        help="Dir where output batches and fixes will be.")
+                        help="Directory for storing raw LLM batch outputs and their fixes.")
     parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
                         help="Path to the prompt template file.")
     parser.add_argument('--psg_key', type=str, default='psg_text',
@@ -295,10 +295,12 @@ def get_args():
     parser.add_argument("--model_name",
                         type=str, default="gpt-4o-2024-08-06",
                         help="model to use for generation, also used to select folder to process")
-    parser.add_argument("--from_sample", type=int, default=0, help="Start index of the batch")
-    parser.add_argument("--to_sample", type=int, default=30, help="End index of the batch")
+    parser.add_argument("--from_sample", type=int, default=0,
+                        help="The starting index of the data samples to process.")
+    parser.add_argument("--to_sample", type=int, default=30,
+                        help="The ending index of the data samples to process.")
     parser.add_argument("--batch_size", type=int, default=15,
-                        help="Batching steps: range(-from-sample, --to-sample, --batch-step)")
+                        help="The number of samples to process in each batch.")
 
     # Generation API args
     parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
