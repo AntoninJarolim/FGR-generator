@@ -12,9 +12,10 @@ class ExplanationsDataset(Dataset):
 
     def __init__(self, file_path, tokenizer,
                  decode_positive_as_list=False, error_on_invalid=False,
-                 psg_key='psg_text', q_key='q_text'):
+                 psg_key='psg_text', q_key='q_text', spans_key='selected_spans'):
         self.psg_key = psg_key
         self.q_key = q_key
+        self.spans_key = spans_key
         self.invalid_indexes = []
         self.error_on_invalid = error_on_invalid
         self.decode_positive_as_list = decode_positive_as_list
@@ -46,7 +47,7 @@ class ExplanationsDataset(Dataset):
         sample: dict = self.data[idx]
         try:
             tokenized_positive, binary_rationales = self.tokenize_with_spans(
-                                               sample[self.psg_key], sample['selected_spans']
+                                               sample[self.psg_key], sample[self.spans_key]
                                                         )
 
         except AssertionError as e:
@@ -62,7 +63,7 @@ class ExplanationsDataset(Dataset):
             'tokenized_positive': tokenized_positive,
             'tokenized_positive_decoded': self.decode_list(tokenized_positive),
             'rationales': binary_rationales,
-            'selected_spans': sample['selected_spans']
+            'selected_spans': sample[self.spans_key]
         }
 
     def encode_text(self, text):

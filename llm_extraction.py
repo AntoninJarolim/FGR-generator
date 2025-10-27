@@ -287,6 +287,8 @@ def get_args():
                         help="Dir where output batches and fixes will be.")
     parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
                         help="Path to the prompt template file.")
+    parser.add_argument('--psg_key', type=str, default='psg_text',
+                        help="Key for the passage text in the input data.")
 
     # Generation setting args
     parser.add_argument("--model_name",
@@ -406,11 +408,11 @@ def annotate_failed_extraction(output_data_file, indexes_to_remove):
     write_out_data(output_data_file, out_data)
 
 
-def find_invalid_samples(output_data_file, last_invalid_indexes):
+def find_invalid_samples(output_data_file, last_invalid_indexes, psg_key):
     tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base')
     dataset = ExplanationsDataset(output_data_file, tokenizer,
                                   decode_positive_as_list=True,
-                                  error_on_invalid=True)
+                                  error_on_invalid=True, psg_key=psg_key)
 
     failed_indexes = []
     for i in tqdm(range(len(dataset)), desc="Finding invalid inputs", unit="samples"):
@@ -547,7 +549,7 @@ def main():
     last_fix = 0
     invalid_samples = None
     for fix_dir in fix_dirs:
-        invalid_samples = find_invalid_samples(output_data_file, invalid_samples)
+        invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
         print(f"{last_fix} fixes applied, {len(invalid_samples)} were removed from output dataset before exiting")
 
         responses_out = get_all_responses(fix_dir)
@@ -560,7 +562,7 @@ def main():
     invalid_samples_history = []
     max_regenerate_count = 5
     while (not args.skip_generation
-           and (invalid_len := len(invalid_samples := find_invalid_samples(output_data_file, invalid_samples))) > 0):
+           and (invalid_len := len(invalid_samples := find_invalid_samples(output_data_file, invalid_samples, args.psg_key))) > 0):
         print(f"Version after {last_fix} fixes has {invalid_len} invalid samples. "
               f"Trying to fix following indexes.")
         print(invalid_samples)
@@ -591,7 +593,7 @@ def main():
                   f"was not changed in last {max_regenerate_count} iterations.")
             break
 
-    invalid_samples = find_invalid_samples(output_data_file, invalid_samples)
+    invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
     annotate_failed_extraction(output_data_file, invalid_samples)
     print(f"{last_fix} fixes applied, {len(invalid_samples)} were removed from output dataset before exiting")
 
