@@ -15,4 +15,4 @@ Můžeš vybrat více úseků, pokud je to potřeba, ale ujisti se, že se vybra
 
 Neopravuj ani neupravuj text! Zachovej všechny gramatické a syntaktické chyby z původního textu.
 
-Vypiš přímo vybrané úseky, oddělené znakem nového řádku (\n). Nevytvářej tedy json object.
+Vrať pouze JSON objekt s klíčem 'spans' a seznamem vybraných úseků jako hodnotou.
