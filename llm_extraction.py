@@ -4,6 +4,7 @@ import os
 import time
 import re
 from datetime import datetime
+from dotenv import load_dotenv
 
 from jinja2 import Template
 from jsonlines import jsonlines
@@ -13,6 +14,7 @@ from transformers import AutoTokenizer
 
 from explainable_dataset import ExplanationsDataset
 
+load_dotenv()  # reads .env in the current working directory
 
 class OpenAIGenerator:
     def __init__(self, model_name, generation_client=False):

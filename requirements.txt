@@ -4,3 +4,4 @@ transformers
 jsonlines
 openai
 Jinja2
+python-dotenv
