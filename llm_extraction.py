@@ -16,6 +16,7 @@ from explainable_dataset import ExplanationsDataset
 
 load_dotenv()  # reads .env in the current working directory
 
+
 class OpenAIGenerator:
     def __init__(self, model_name, generation_client=False):
         url = os.getenv('OPENAI_BASE_URL') + '/v1'
@@ -277,47 +278,6 @@ def get_all_responses(generated_data_dir):
     return outs
 
 
-def get_args():
-    argparse.ArgumentParser(description='Generate explanations for MSMARCO dataset')
-    parser = argparse.ArgumentParser()
-
-    # Task args
-    parser.add_argument("--skip_generation", action='store_true',
-                        help="only processes each output file")
-    parser.add_argument("--force_rewrite", action="store_true",
-                        help="Disables the check for generating into existing directory.")
-
-    # Data args
-    parser.add_argument('--input_data_name', type=str, required=True,
-                        help="Filename to generate relevance extraction data.")
-    parser.add_argument('--input_generated_relevance', type=str, required=False, default=None,
-                        help="TSV file having extracted relevance, just to not generate twice.")
-    parser.add_argument('--generate_into_dir', type=str, default="generated",
-                        help="Directory for storing raw LLM batch outputs and their fixes.")
-    parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
-                        help="Path to the prompt template file.")
-    parser.add_argument('--psg_key', type=str, default='psg_text',
-                        help="Key for the passage text in the input data.")
-
-    # Generation setting args
-    parser.add_argument("--model_name",
-                        type=str, default="gpt-4o-2024-08-06",
-                        help="model to use for generation, also used to select folder to process")
-    parser.add_argument("--from_sample", type=int, default=0,
-                        help="The starting index of the data samples to process.")
-    parser.add_argument("--to_sample", type=int, default=-1,
-                        help="The ending index of the data samples to process.")
-    parser.add_argument("--batch_size", type=int, default=15,
-                        help="The number of samples to process in each batch.")
-
-    # Generation API args
-    parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
-                        help="Specify which generation client should be used. "
-                             "Available: 'ollama', 'vllm', 'openai'")
-
-    return parser.parse_args()
-
-
 def generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client, template):
     if generation_client == 'openai':
         generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, template)
@@ -480,37 +440,20 @@ def find_sorted_fix_dirs(generated_data_dir):
     return fix_dirs
 
 
-def load_already_generated(input_generated_relevance):
-    # Key is (q_id, psg_id)
-    if input_generated_relevance is None:
-        return set()
-
-    already_generated = set()
-    with open(input_generated_relevance) as relevanece_file:
-        for line in relevanece_file:
-            q_id, psg_id, *_ = line.split("\t")
-            already_generated.add((int(q_id), int(psg_id)))
-
-    return already_generated
-
-
-def create_minibatch(input_data, already_generated, generated_ids, from_sample, batch_size, batch_start,
+def create_minibatch(input_data, generated_ids, from_sample, batch_size, batch_start,
                      input_data_len):
     minibatch = {}
     for data_idx in range(batch_start, min(batch_start + batch_size, input_data_len)):
         if data_idx + from_sample in generated_ids:
             continue
-        generate_for = input_data[data_idx]
-        q_id, psg_id = generate_for['q_id'], generate_for['psg_id']
-        if (q_id, psg_id) not in already_generated:
-            minibatch[data_idx + from_sample] = input_data[data_idx]
+        minibatch[data_idx + from_sample] = input_data[data_idx]
     return minibatch
 
 
-def create_batched_input(input_data, already_generated, generated_ids, from_sample, batch_size):
+def create_batched_input(input_data, generated_ids, from_sample, batch_size):
     input_data_len = len(input_data)
     data_chunks = [
-        create_minibatch(input_data, already_generated, generated_ids,
+        create_minibatch(input_data, generated_ids,
                          from_sample, batch_size, batch_start, input_data_len)
         for batch_start in range(0, input_data_len, batch_size)
     ]
@@ -520,6 +463,45 @@ def create_batched_input(input_data, already_generated, generated_ids, from_samp
 
 def sanitize_model_name(model_name):
     return model_name.replace('/', '~')
+
+
+def get_args():
+    argparse.ArgumentParser(description='Generate explanations for MSMARCO dataset')
+    parser = argparse.ArgumentParser()
+
+    # Task args
+    parser.add_argument("--skip_generation", action='store_true',
+                        help="only processes each output file")
+    parser.add_argument("--force_rewrite", action="store_true",
+                        help="Disables the check for generating into existing directory.")
+
+    # Data args
+    parser.add_argument('--input_data_name', type=str, required=True,
+                        help="Filename to generate relevance extraction data.")
+    parser.add_argument('--generate_into_dir', type=str, default="generated",
+                        help="Directory for storing raw LLM batch outputs and their fixes.")
+    parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
+                        help="Path to the prompt template file.")
+    parser.add_argument('--psg_key', type=str, default='psg_text',
+                        help="Key for the passage text in the input data.")
+
+    # Generation setting args
+    parser.add_argument("--model_name",
+                        type=str, default="gpt-4o-2024-08-06",
+                        help="model to use for generation, also used to select folder to process")
+    parser.add_argument("--from_sample", type=int, default=0,
+                        help="The starting index of the data samples to process.")
+    parser.add_argument("--to_sample", type=int, default=-1,
+                        help="The ending index of the data samples to process.")
+    parser.add_argument("--batch_size", type=int, default=15,
+                        help="The number of samples to process in each batch.")
+
+    # Generation API args
+    parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
+                        help="Specify which generation client should be used. "
+                             "Available: 'ollama', 'vllm', 'openai'")
+
+    return parser.parse_args()
 
 
 def main():
@@ -536,7 +518,6 @@ def main():
 
     # Read input data
     input_data = read_input_data(args.input_data_name, args.from_sample, args.to_sample)
-    already_generated = load_already_generated(args.input_generated_relevance)
 
     # Prepare out data file
     model_name = sanitize_model_name(args.model_name)
@@ -545,7 +526,7 @@ def main():
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
         generated_ids = prepare_out_dir(generated_data_dir, args.force_rewrite)
-        data_chunks = create_batched_input(input_data, already_generated, generated_ids,
+        data_chunks = create_batched_input(input_data, generated_ids,
                                            args.from_sample, args.batch_size)
         generate_all_batches(data_chunks,
                              generation_api,
