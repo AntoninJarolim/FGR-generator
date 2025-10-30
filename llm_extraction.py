@@ -258,6 +258,8 @@ def get_all_responses(generated_data_dir):
     responses = {}
 
     files_to_process = get_sorted_generation_files(generated_data_dir)
+    if not files_to_process:
+        print(f"Warning: No output files found to process. in {generated_data_dir}")
 
     for process_filename in tqdm(files_to_process, desc=f"Processing output files in {generated_data_dir}"):
         responses.update(process_output(process_filename))
@@ -265,12 +267,15 @@ def get_all_responses(generated_data_dir):
     json_decode_error = 0
 
     def decode_one(v):
-        try:
-            return json.loads(v)
-        except json.JSONDecodeError:
-            nonlocal json_decode_error
-            json_decode_error += 1
-            return {'spans': []}
+        if type(v) is str:
+            try:
+                object = json.loads(v)
+                if 'spans' in object:
+                    return object
+            except json.JSONDecodeError:
+                nonlocal json_decode_error
+                json_decode_error += 1
+        return {'spans': []}
 
     # Create new list by sorting with keys - rowid, needed to match input
     outs = {k: decode_one(v) for k, v in responses.items()}
@@ -343,7 +348,7 @@ def write_output(responses_out, output_data_file, input_data, from_sample):
             writer.write(
                 {
                     **input_data[in_key - from_sample],
-                    'selected_spans': out_selected['spans']
+                    'selected_spans': out_selected.get('spans', [])
                 }
             )
 
@@ -380,7 +385,7 @@ def annotate_failed_extraction(output_data_file, indexes_to_remove):
 
 
 def find_invalid_samples(output_data_file, last_invalid_indexes, psg_key):
-    tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base')
+    tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base', truncation=False)
     dataset = ExplanationsDataset(output_data_file, tokenizer,
                                   decode_positive_as_list=True,
                                   error_on_invalid=True, psg_key=psg_key)
