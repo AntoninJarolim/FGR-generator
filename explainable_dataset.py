@@ -1,4 +1,5 @@
 import json
+import os
 from json import JSONDecodeError
 
 import torch
@@ -12,9 +13,8 @@ class ExplanationsDataset(Dataset):
 
     def __init__(self, file_path, tokenizer,
                  decode_positive_as_list=False, error_on_invalid=False,
-                 psg_key='psg_text', q_key='q_text', spans_key='selected_spans'):
+                 psg_key='psg_text', spans_key='selected_spans'):
         self.psg_key = psg_key
-        self.q_key = q_key
         self.spans_key = spans_key
         self.invalid_indexes = []
         self.error_on_invalid = error_on_invalid
@@ -32,7 +32,6 @@ class ExplanationsDataset(Dataset):
 
             self.data = [decode_line(line) for line in f]
 
-
     def __len__(self):
         return len(self.data)
 
@@ -47,8 +46,8 @@ class ExplanationsDataset(Dataset):
         sample: dict = self.data[idx]
         try:
             tokenized_positive, binary_rationales = self.tokenize_with_spans(
-                                               sample[self.psg_key], sample[self.spans_key]
-                                                        )
+                sample[self.psg_key], sample[self.spans_key]
+            )
 
         except AssertionError as e:
             if self.error_on_invalid:
@@ -58,7 +57,6 @@ class ExplanationsDataset(Dataset):
             return None, None
 
         return {
-            self.q_key: sample[self.q_key],
             self.psg_key: sample[self.psg_key],
             'tokenized_positive': tokenized_positive,
             'tokenized_positive_decoded': self.decode_list(tokenized_positive),
@@ -89,8 +87,8 @@ class ExplanationsDataset(Dataset):
         # Encode and split offsets to starts and ends
         encoded = self.encode_text(positive_text)
         encoded_text = encoded["input_ids"]
-        offset_mapping_starts = encoded["offset_mapping"][:, 0] # 0th dim are starts
-        offset_mapping_ends = encoded["offset_mapping"][:, 1] # 1st dim are ends
+        offset_mapping_starts = encoded["offset_mapping"][:, 0]  # 0th dim are starts
+        offset_mapping_ends = encoded["offset_mapping"][:, 1]  # 1st dim are ends
 
         # Reshape for broadcasting each-to-each
         start_overlap = offset_mapping_starts[:, None] < spand_ends
@@ -119,15 +117,29 @@ if __name__ == "__main__":
     # file_path = 'data/35_random_samples_llama2:13b.jsonl'
     # file_path = 'data/gemma2:27b-instruct-q8_0.jsonl'
     # file_path = 'data/triplets_explained.jsonl'
-    file_path = 'data/ms-marco-human-explained/out_1_explained.jsonl'
+
+    dataset_name  = 'gemma3:4b_from0-to185'
+    file_path = f'data/extracted_relevancy/{dataset_name}.jsonl'
 
     tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base')
-    dataset = ExplanationsDataset(file_path, tokenizer, decode_positive_as_list=True,
-                                psg_key='passage', q_key='query')
+    dataset = ExplanationsDataset(
+        file_path, tokenizer, decode_positive_as_list=True,
+        psg_key='clean_text', error_on_invalid=True
+    )
 
     # Iterate through the data
+    exceptions = []
     for i in tqdm(range(len(dataset))):
-        d = dataset[i]
-        print(d)
+        try:
+            d = dataset[i]
+        except Exception as e:
+            exceptions.append((i, e))
 
-    print(f"Invalid indexes: {dataset.invalid_indexes}")
+    exceptions_dir = f"data/failed_explanations/{dataset_name}"
+    os.makedirs(exceptions_dir, exist_ok=True)
+
+    # Save exceptions to files
+    for idx, exception in exceptions:
+        with open(f"{exceptions_dir}/exception_{idx}.txt", "w") as f:
+            f.write(str(exception))
+
