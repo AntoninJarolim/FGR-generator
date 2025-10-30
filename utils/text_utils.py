@@ -39,8 +39,10 @@ def find_spans(text, selected_spans):
         print(selected_spans)
         raise AssertionError("Selected spans must be list!")
 
-    if isinstance(selected_spans[0], dict):
-        selected_spans = [span['text'] for span in selected_spans]
+    if not isinstance(selected_spans[0], str):
+        print(selected_spans)
+        raise AssertionError(f"selected_spans[0] must be str but got {type(selected_spans[0])}!")
+
     for span in selected_spans:
         span_start = find_span_start_index(text, span)
         if span_start == -1:
