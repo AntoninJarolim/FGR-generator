@@ -416,6 +416,11 @@ def prepare_out_dir(generated_data_dir, force_rewrite):
     try:
         os.makedirs(generated_data_dir)
     except FileExistsError:
+        empty_dir = not os.listdir(generated_data_dir)
+        if empty_dir:
+            return set()
+
+        # dir is not empty, find generated files and skip them for generation
         if force_rewrite:
             already_generated = find_generated_indexes(generated_data_dir)
             print(f"Directory {generated_data_dir} already exists.")
@@ -483,7 +488,7 @@ def get_args():
     # Data args
     parser.add_argument('--input_data_name', type=str, required=True,
                         help="Filename to generate relevance extraction data.")
-    parser.add_argument('--generate_into_dir', type=str, default="generated",
+    parser.add_argument('--generate_into_dir', type=str, default="data/generated",
                         help="Directory for storing raw LLM batch outputs and their fixes.")
     parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
                         help="Path to the prompt template file.")
@@ -500,6 +505,8 @@ def get_args():
                         help="The ending index of the data samples to process.")
     parser.add_argument("--batch_size", type=int, default=15,
                         help="The number of samples to process in each batch.")
+    parser.add_argument("--max_fixes", type=int, default=-1,
+                        help="Maximum number of fixes to apply. (-1 for unlimited)")
 
     # Generation API args
     parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
@@ -554,7 +561,7 @@ def main():
     invalid_samples = None
     for fix_dir in fix_dirs:
         invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
-        print(f"{last_fix} fixes applied, {len(invalid_samples)} were removed from output dataset before exiting")
+        print(f"{last_fix} fixes applied, {len(invalid_samples)} were marked as invalid in the output dataset before exiting")
 
         responses_out = get_all_responses(fix_dir)
         # assert sorted(list(responses_out.keys())) == sorted(invalid_samples)
@@ -598,9 +605,14 @@ def main():
                   f"was not changed in last {max_regenerate_count} iterations.")
             break
 
+        # Negative = unlimited
+        if 0 < args.max_fixes <= last_fix:
+            print(f"Exiting because maximum number of fixes reached ({args.max_fixes}).")
+            break
+
     invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
     annotate_failed_extraction(output_data_file, invalid_samples)
-    print(f"{last_fix} fixes applied, {len(invalid_samples)} were removed from output dataset before exiting")
+    print(f"{last_fix} fixes applied, {len(invalid_samples)} were marked as invalid in the output dataset before exiting")
 
 
 if __name__ == "__main__":
