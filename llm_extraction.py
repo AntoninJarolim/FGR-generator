@@ -35,7 +35,7 @@ class OpenAIGenerator:
         self.model = model_name  # self.model = "gpt-4o-2024-08-06" "gpt-4o-mini"
 
         self.temperature = 0.2
-        self.max_tokens = 1024
+        self.max_tokens = 2**14 # 16384
         self.top_p = 1
         self.frequency_penalty = 0
         self.presence_penalty = 0
