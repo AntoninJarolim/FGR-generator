@@ -4,7 +4,6 @@ import os
 import time
 import re
 from datetime import datetime
-from dotenv import load_dotenv
 
 from jinja2 import Template
 from jsonlines import jsonlines
@@ -14,17 +13,16 @@ from transformers import AutoTokenizer
 
 from explainable_dataset import ExplanationsDataset
 
-load_dotenv()  # reads .env in the current working directory
 
 
 class OpenAIGenerator:
-    def __init__(self, model_name, generation_client=False):
+    def __init__(self, model_name, generation_client=False, api_token_env_var=None):
         url = os.getenv('OPENAI_BASE_URL') + '/v1'
         if generation_client == 'ollama':
             print("Initialized OLLAMA generation client.")
             self.client = OpenAI(
                 base_url=url,
-                api_key='ollama',
+                api_key=os.getenv(api_token_env_var, 'ollama'),
             )
         elif generation_client == 'vllm':
             print("Initialized VLLM generation client.")
@@ -512,6 +510,9 @@ def get_args():
     parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
                         help="Specify which generation client should be used. "
                              "Available: 'ollama', 'vllm', 'openai'")
+    parser.add_argument('--api_token_env_var', type=str,
+                        default='E_INFRA_API_TOKEN',
+                        help='API token for E_INFRA')
 
     return parser.parse_args()
 
@@ -521,7 +522,12 @@ def main():
 
     # Prepare API
     if not args.skip_generation:
-        generation_api = OpenAIGenerator(args.model_name, generation_client=args.generation_client)
+        generation_api = OpenAIGenerator(
+            args.model_name,
+            generation_client=args.generation_client,
+            api_token_env_var=args.api_token_env_var
+        )
+
     else:
         generation_api = None
 
