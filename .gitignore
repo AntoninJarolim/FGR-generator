@@ -1,4 +1,5 @@
 data/
 .idea/
 .env
+.env_einfra
 notebooks/.ipynb_checkpoints

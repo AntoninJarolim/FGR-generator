@@ -1,16 +1,32 @@
 #!/bin/bash
 
-# Load .env and export OPENAI_BASE_URL → OLLAMA_HOST
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+# --- Argument Parsing ---
+EINFRA=0
+PULL_ONLY=0
+for arg in "$@"; do
+  case $arg in
+    --einfra) EINFRA=1 ;;
+    pull) PULL_ONLY=1 ;;
+  esac
+done
+
+# --- Environment Loading ---
+if [ "$EINFRA" -eq 1 ]; then
+  ENV_FILE=".env_einfra"
 else
-    echo ".env file not found!"
-    exit 1
+  ENV_FILE=".env"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  export $(grep -v '^#' "$ENV_FILE" | xargs)
+else
+  echo "$ENV_FILE file not found!"
+  exit 1
 fi
 
 if [ -z "$OPENAI_BASE_URL" ]; then
-    echo "OPENAI_BASE_URL not set in .env"
-    exit 1
+  echo "OPENAI_BASE_URL not set in $ENV_FILE"
+  exit 1
 fi
 
 export OLLAMA_HOST="$OPENAI_BASE_URL"
@@ -40,23 +56,13 @@ EINFRA_LLM_MODELS=(
     "deepseek-r1"
 )
 
-# --- Argument Parsing and Configuration ---
-LLM_MODELS=("${DEFAULT_LLM_MODELS[@]}")
-PULL_ONLY=0
-
-# Parse arguments
-for arg in "$@"
-do
-    case $arg in
-        --einfra)
-        echo "Using e-infra models"
-        LLM_MODELS=("${EINFRA_LLM_MODELS[@]}")
-        ;;
-        pull)
-        PULL_ONLY=1
-        ;;
-    esac
-done
+# --- Model Selection ---
+if [ "$EINFRA" -eq 1 ]; then
+  echo "Using e-infra models"
+  LLM_MODELS=("${EINFRA_LLM_MODELS[@]}")
+else
+  LLM_MODELS=("${DEFAULT_LLM_MODELS[@]}")
+fi
 
 # --- Main Logic ---
 if [[ "$PULL_ONLY" -eq 1 ]]; then
@@ -71,7 +77,6 @@ if [[ "$PULL_ONLY" -eq 1 ]]; then
   done
   exit 0
 fi
-
 
 # List of template files
 TEMPLATE_FILES=(
