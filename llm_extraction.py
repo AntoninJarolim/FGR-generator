@@ -538,9 +538,10 @@ def main():
     input_data = read_input_data(args.input_data_name, args.from_sample, args.to_sample)
 
     # Prepare out data file
+    template_name = os.path.basename(args.template_file).replace('.template', '')
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
-    generated_data_dir = os.path.join(args.generate_into_dir, batch_dir)
+    generated_data_dir = os.path.join(args.generate_into_dir, template_name, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
         generated_ids = prepare_out_dir(generated_data_dir, args.force_rewrite)
@@ -556,7 +557,7 @@ def main():
     responses_out = get_all_responses(generated_data_dir)
 
     # Remove file if exists
-    output_data_file = f"data/extracted_relevancy/{batch_dir}.jsonl"
+    output_data_file = f"data/extracted_relevancy/{template_name}/{batch_dir}.jsonl"
     os.makedirs(os.path.dirname(output_data_file), exist_ok=True)
 
     print(f"Saving output data to {output_data_file}")

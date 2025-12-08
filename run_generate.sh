@@ -48,7 +48,6 @@ DEFAULT_LLM_MODELS=(
   "qwen3:32b"
   "qwen2.5:32b"
   "qwen2.5:72b"
-  "gpt-oss:120b"
 )
 
 EINFRA_LLM_MODELS=(
@@ -80,7 +79,8 @@ fi
 
 # List of template files
 TEMPLATE_FILES=(
-    "templates/FDM-evidence-pos.template"
+    # "templates/FDM-evidence-pos.template"
+    "templates/FDM-evidence-pos-EN.template"
     # "templates/FDM-evidence-neg.template"
     # Add more template files here
 )
@@ -88,7 +88,8 @@ TEMPLATE_FILES=(
 # Loop through each model and then each template file
 for MODEL_NAME in "${LLM_MODELS[@]}"; do
     for TEMPLATE_FILE in "${TEMPLATE_FILES[@]}"; do
-        echo "Running llm_extraction.py with model: $MODEL_NAME and template: $TEMPLATE_FILE"
+        start_time=$(date +%s)
+        echo "Running llm_extraction.py with model: $MODEL_NAME and template: $TEMPLATE_FILE. Current time: $(date +"%Y-%m-%d %H:%M:%S")"
         python llm_extraction.py \
             --input_data_name data/to-generate/for_llm_annotation.json \
             --template_file "$TEMPLATE_FILE" \
@@ -97,7 +98,10 @@ for MODEL_NAME in "${LLM_MODELS[@]}"; do
             --generation_client ollama \
             --batch_size 50 \
 	          --max_fixes 10
-        echo "Finished running for model: $MODEL_NAME and template: $TEMPLATE_FILE"
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        current_time=$(date +"%Y-%m-%d %H:%M:%S")
+        echo "Finished running for model: $MODEL_NAME and template: $TEMPLATE_FILE. Loop took: $duration seconds. Current time: $current_time"
         echo "----------------------------------------------------"
     done
 done

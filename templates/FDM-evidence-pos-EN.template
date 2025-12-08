@@ -1,0 +1,21 @@
+Comment (for context):
+{{source}}
+
+Claim (extracted from the comment):
+{{claim}}
+
+Text:
+{{clean_text}}
+
+Your task is to identify the smallest possible parts of the Text that directly support the claim.
+
+Focus on the phrases that most clearly justify or confirm the truth of the claim.
+Do not select whole sentences unless absolutely necessary—choose the shortest meaningful spans that stand on their own.
+You may select multiple spans if more than one part of the text provides evidence.
+
+Do not modify, correct, or rewrite the text. Keep all grammatical and syntactic errors exactly as they appear in the original.
+
+Return only a JSON object of type Dict[str, List[str]] with the key 'spans' and a list of selected spans as its value.
+
+Important: Every selected span must be an exact substring of the given Text — character-for-character identical.
+Do not paraphrase, retype, or alter any character (including punctuation, spacing, or capitalization).
