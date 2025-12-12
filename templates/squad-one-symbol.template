@@ -1,4 +1,7 @@
-You are an extractive QA system. Your task is to find the answer to the question inside the context and mark it with the special tokens {{start_span_token}} (start) and {{end_span_token}} (end). Output only the context with the answer marked as "Labeled Context:".
+You are an extractive QA system. Your task is to find the answer to the question inside the context and mark it with the special tokens.
+Mark start of the span with special token {{start_span_token}} and end of the span with this special token {{end_span_token}}.
+
+Output only the context with the answer marked as "Labeled Context:".
 
 Example 1:
 Question: What percentage of Egyptians polled support death penalty for those leaving Islam?

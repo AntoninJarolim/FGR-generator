@@ -1,9 +1,12 @@
 import argparse
 import os.path
 from collections import namedtuple
+from curses import start_color
 
 import torch
 import json
+
+import tqdm
 from jinja2 import Template
 
 from datasets import load_dataset
@@ -37,10 +40,8 @@ def long_ans_squad(min_ans_size, max_dataset_size):
     return records
 
 
-def create_prompt(question, context):
-    """Create the prompt for the LLM (placeholder)."""
-    return f"Question: {question}\nContext: {context}\nLabeled Context:"
-
+def create_prompt(template, **kwargs):
+    return template.render(**kwargs)
 
 def extract_span(start_token, end_token, generated_text):
     """Extract text between start and end tokens."""
@@ -57,20 +58,11 @@ def encode_with_llm(template, context):
     return torch.rand(len(context))
 
 
-def max_insert(logits, insert_token):
-    """
-    Returns the position where the insert_token should be inserted.
-    Scatter logic placeholder.
-    """
+def max_insert(logits, insert_token_id):
     # In real use, scatter logits and return argmax
-    pos = torch.argmax(logits).item()
+    selected_logits = logits[:, :, insert_token_id]
+    pos = torch.argmax(logits[:, :, insert_token_id], dim=-1).item()
     return pos
-
-
-def update_prompt(template, start_context):
-    """Update the template with partially labeled context."""
-    return template.replace("Context:", f"Context: {start_context}")
-
 
 # -----------------------------
 # Loop functions
@@ -80,13 +72,28 @@ def update_prompt(template, start_context):
 class LLMRunner:
     def __init__(self, model_name, device=None, max_new_tokens=1024, do_sample=False):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.float16,
+        )
+
+        self.model.eval()
+        torch.set_grad_enabled(False)
 
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
+
+    def tokenize_char(self, character):
+        assert len(character) == 1
+
+        tokenized = self.tokenizer(character, return_tensors="pt", add_special_tokens=False)
+        assert len(tokenized["input_ids"][0]) == 1, "This character is not tokenized as one token."
+
+        return tokenized["input_ids"][0][0]
+
 
     def tokenize_run(self, prompt: str) -> str:
         """
@@ -103,15 +110,59 @@ class LLMRunner:
         )
 
         # Decode to string
-        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        input_size = len(inputs['input_ids'][0])
+        generated_text = self.tokenizer.decode(outputs[0][input_size:], skip_special_tokens=True)
         return generated_text
+
+    def encode_ctx(self, template, context) -> str:
+
+        # tokenize context alone (only for length, no tensors needed)
+        ctx = self.tokenizer(context, add_special_tokens=False, return_length=True)
+        context_len = ctx["length"][0]
+
+        full_text = template + context
+        inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
+
+
+        # Generate output
+        outputs = self.model(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=self.do_sample
+        )
+
+        return outputs['logits'][:, -context_len:]
+
+
+    def split_context_by_tokens(self, text: str, start_context: int):
+        # Tokenize without special tokens
+        ctx = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_tensors="pt"
+        )
+
+        # Get token ids (1D tensor)
+        token_ids = ctx["input_ids"][0]
+
+        # Split tokens
+        left_tokens  = token_ids[:start_context]
+        right_tokens = token_ids[start_context:]
+
+        # Decode back to text
+        left_text  = self.tokenizer.decode(left_tokens, skip_special_tokens=True)
+        right_text = self.tokenizer.decode(right_tokens, skip_special_tokens=True)
+
+        return left_text, right_text
+
 
 
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
     results = []
-    for question, _, context in data:
+    for question, _, context in tqdm.tqdm(data):
 
-        prompt = template.render(
+        prompt = create_prompt(
+            template,
             start_span_token=start_span_token,
             end_span_token=end_span_token,
             question=question,
@@ -135,22 +186,33 @@ def read_template(path):
 # Main function
 # -----------------------------
 
-def generate_parallel_answers(data, start_span_token, end_span_token):
+def generate_parallel_answers(data, template, model, start_span_token, end_span_token):
     results = []
-    for _, _, context in data:
-        template = create_prompt("", context)
+    start_span_token_id = model.tokenize_char(start_span_token)
+    end_span_token_id = model.tokenize_char(end_span_token)
 
-        logits = encode_with_llm(template, context)
-        start = max_insert(logits, start_span_token)
-        start_context = context[:start] + start_span_token
-        end_context = context[start:]
+    for question, _, context in tqdm.tqdm(data):
+        prompt = create_prompt(
+            template,
+            start_span_token=start_span_token,
+            end_span_token=end_span_token,
+            question=question,
+            context=context
+        )
 
-        prompt = update_prompt(template, start_context)
-        logits = encode_with_llm(prompt, end_context)
-        end = max_insert(logits, end_span_token)
+        logits = model.encode_ctx(prompt, context)
+        start = max_insert(logits, start_span_token_id)
+        start_context, end_context = model.split_context_by_tokens(context, start)
+        start_context = start_context + start_span_token
 
-        answer = context[start:end]
-        results.append((context, answer))
+        prompt_ctx = prompt + start_context
+        logits = model.encode_ctx(prompt_ctx, end_context)
+        end = max_insert(logits, end_span_token_id)
+        end_start, end_end = model.split_context_by_tokens(end_context, end)
+        prompt_ctx = start_context + end_start + end_span_token + end_end
+
+        answer = extract_span(start_span_token, end_span_token, prompt_ctx)
+        results.append(((question, context), answer))
     return results
 
 def parse_args():
@@ -159,7 +221,7 @@ def parse_args():
     parser.add_argument("--min_ans_size", type=int, default=5, help="Minimum answer word count.")
     parser.add_argument("--max_dataset_size", type=int, default=300, help="Maximum dataset size to process.")
 
-    parser.add_argument("--model", type=str, default="google/gemma-3-4b-it", help="HF model id to use.")
+    parser.add_argument("--model", type=str, default="google/gemma-7b-it", help="HF model id to use.")
     parser.add_argument("--start_span_token", type=str, default="⟦", help="Start span token.")
     parser.add_argument("--end_span_token", type=str, default="⟧", help="End span token.")
 
@@ -184,6 +246,14 @@ def main():
         data_out["gt"].append((question, context, answer))
 
     # Standard LLM generation
+    data_out["parallel"] = generate_parallel_answers(
+        data,
+        template,
+        model=model,
+        start_span_token=args.start_span_token,
+        end_span_token=args.end_span_token
+    )
+
     data_out["standard"] = generate_standard_answers(
         template=template,
         model=model,
@@ -193,18 +263,12 @@ def main():
     )
 
     # Parallel span selection
-    data_out["parallel"] = generate_parallel_answers(
-        data,
-        start_span_token=args.start_span_token,
-        end_span_token=args.end_span_token
-    )
 
-
-    if not os.path.exists(args.extracted_data_path):
-        os.makedirs(args.extracted_data_path)
+    dir_path = os.path.dirname(args.extracted_data_path)
+    os.makedirs(dir_path, exist_ok=True)
 
     with open(args.extracted_data_path, "w", encoding="utf-8") as f:
-        json.dump(data_out, f, ensure_ascii=False, indent=2)
+        json.dump(data_out, f, ensure_ascii=False, indent=4)
 
     print(f"Saved extracted data to {args.extracted_data_path}")
 
