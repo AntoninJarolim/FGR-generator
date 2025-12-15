@@ -1,9 +1,5 @@
 import argparse
 import os.path
-import shutil
-import sys
-from collections import namedtuple
-from curses import start_color
 
 import torch
 import json
@@ -13,8 +9,6 @@ from jinja2 import Template
 
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
-Record = namedtuple("Record", ["question", "answer", "context"])
 
 
 def long_ans_squad(min_ans_size, max_dataset_size):
@@ -33,7 +27,7 @@ def long_ans_squad(min_ans_size, max_dataset_size):
         if any(len(a.split()) < min_ans_size for a in answers):
             continue
 
-        records.append(Record(question=question, answer=answers, context=context))
+        records.append({"question": question, "answer": answers, "context": context})
 
         # Stop if reached max_dataset_size
         if max_dataset_size and len(records) >= max_dataset_size:
@@ -182,19 +176,26 @@ class LLMRunner:
 
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
     results = []
-    for question, _, context in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data):
         prompt = create_prompt(
             template,
             start_span_token=start_span_token,
             end_span_token=end_span_token,
-            question=question,
-            context=context
+            question=record["question"],
+            context=record["context"]
         )
 
-        outputs = model.tokenize_run(prompt)
+        generated = model.tokenize_run(prompt)
+        answer = extract_span(start_span_token, end_span_token, generated)
 
-        answer = extract_span(start_span_token, end_span_token, outputs)
-        results.append(((question, context), answer))
+        results.append(
+            {
+                "question": record["question"],
+                "context": record["context"],
+                "prediction": answer,
+                "raw_output": generated,
+            }
+        )
     return results
 
 
@@ -217,7 +218,10 @@ def generate_parallel_answers(data, template, model, start_span_token, end_span_
 
     data = remove_special_tokens(data, end_span_token, start_span_token)
 
-    for question, _, context in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data):
+        context = record['context']
+        question = record['question']
+
         prompt = create_prompt(
             template,
             start_span_token=start_span_token,
@@ -238,24 +242,32 @@ def generate_parallel_answers(data, template, model, start_span_token, end_span_
         annotated = start_context + end_start + end_span_token + end_end
 
         answer = extract_span(start_span_token, end_span_token, annotated)
-        results.append(((question, context), answer))
+        results.append(
+            {
+                "question": question,
+                "context": context,
+                "prediction": answer,
+                "raw_output": annotated,
+            }
+        )
     return results
 
 
 def remove_special_tokens(data, end_span_token, start_span_token):
     data_removed_special = []
-    for question, answers, context in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data):
         data_removed_special.append(
-            (
-                remove_special_token(question, start_span_token, end_span_token),
-                [
+            {
+                "question": remove_special_token(record["question"], start_span_token, end_span_token),
+                "answer": [
                     remove_special_token(a, start_span_token, end_span_token)
-                    for a in answers
+                    for a in record["answer"]
                 ],
-                remove_special_token(context, start_span_token, end_span_token)
-            )
+                "context": remove_special_token(record["context"], start_span_token, end_span_token)
+            }
         )
     return data_removed_special
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM extractive QA processing.")
@@ -288,7 +300,7 @@ def main():
     ensure_created_directory(args.extracted_data_path)
 
     # Save ground truth
-    gt_data = [(q, c, a) for q, a, c in data]
+    gt_data = [{"question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
     gt_path = os.path.join(args.extracted_data_path, "gt.json")
     with open(gt_path, "w", encoding="utf-8") as f:
         json.dump(gt_data, f, ensure_ascii=False, indent=4)

@@ -11,8 +11,9 @@ def evaluate(predictions, ground_truths_map):
     if not predictions:
         return 0.0, 0.0
 
-    for key_as_list, prediction_text in predictions:
-        key = tuple(key_as_list)
+    for pred_item in predictions:
+        key = (pred_item["question"], pred_item["context"])
+        prediction_text = pred_item["prediction"]
         ground_truths = ground_truths_map.get(key)
 
         if ground_truths:
@@ -39,7 +40,7 @@ def main():
         print(f"Error: Ground truth file not found at {gt_path}")
         return
         
-    ground_truths_map = {tuple(item[0:2]): item[2] for item in gt_data}
+    ground_truths_map = {(item["question"], item["context"]): item["answers"] for item in gt_data}
 
     # Evaluate standard method
     standard_path = os.path.join(args.input_dir, "standard.json")
