@@ -9,7 +9,8 @@ user = api.whoami()
 print("You are logged in as:", user["name"])
 
 
-MODEL_NAME = "google/gemma-3-4b-it"
+# MODEL_NAME = "google/gemma-3-4b-it"
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 CANDIDATES = [
     "§", "‡", "¶", "※", "⁂", "¤", "↯",
     "⟦", "⟧", "⟨", "⟩", "⟪", "⟫",
