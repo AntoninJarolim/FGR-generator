@@ -33,10 +33,6 @@ def bytes_to_unicode():
     cs = [chr(n) for n in cs]
     return dict(zip(bs, cs))
 
-unicode_to_bytes_dict = {ord(v): k for k, v in bytes_to_unicode().items()}
-
-def unicode_to_bytes(target):
-    return unicode_to_bytes_dict[target]
 
 class TokenByteFinder:
     def __init__(self, tokenizer):
@@ -47,8 +43,10 @@ class TokenByteFinder:
 
         self.vocab = self.tokenizer.get_vocab()
         self.id_to_token = {idx: tok for tok, idx in self.vocab.items()}
+
+        unicode_to_bytes = {ord(v): k for k, v in bytes_to_unicode().items()}
         self.token_bytes = {
-            t_id: bytes([unicode_to_bytes(ord(t_char)) for t_char in t])
+            t_id: bytes([unicode_to_bytes[ord(t_char)] for t_char in t])
             for t, t_id in self.vocab.items()
         }
 
@@ -149,7 +147,7 @@ if __name__ == "__main__":
     #   "gpt2"
     #   "EleutherAI/gpt-neox-20b"
 
-    TARGET_UTF =  "—" # "‡"  # try: "€", "—", "🙂", "\u0301"
+    TARGET_UTF = "€" # "—"  "‡" try: "€", "—", "🙂", "\u0301"
 
     oracle = TokenByteFinder(MODEL_NAME)
     
