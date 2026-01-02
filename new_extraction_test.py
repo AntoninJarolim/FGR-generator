@@ -1,3 +1,4 @@
+import functools
 import argparse
 import os.path
 
@@ -11,6 +12,7 @@ from datasets import load_dataset
 
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
+
 
 
 def long_ans_squad(min_ans_size, max_dataset_size):
@@ -248,7 +250,7 @@ def parse_args():
                         help="Path to the directory to save extracted data.")
     parser.add_argument("--template_path", type=str, required=True, help="Path to the Jinja template.")
     parser.add_argument("--method", type=str,
-                        choices=['standard', 'parallel', 'standard_custom_decode', 'all'],
+                        choices=['standard', 'parallel', 'parallel_multiple', 'standard_custom_decode', 'all'],
                         default='all',
                         help="Which method to run and save.")
     return parser.parse_args()
@@ -264,31 +266,54 @@ def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
     print(f"Saved {method_name} method results to {output_path}")
 
 
+def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
+    """
+    Loads ground truth data if it exists, otherwise creates it.
+    Returns the dataset in the format required for generation functions.
+    """
+    gt_path = os.path.join(output_dir, "gt.json")
+
+    # Ensure the output directory exists
+    ensure_created_directory(output_dir)
+
+    if os.path.exists(gt_path):
+        print(f"Ground truth file '{gt_path}' already exists. Loading it.")
+        print("Ignoring dataset creation arguments (--min_ans_size, --max_dataset_size).")
+        with open(gt_path, 'r', encoding='utf-8') as f:
+            gt_data = json.load(f)
+        # Re-create the 'data' structure as it's used by generation functions
+        data = [{"question": r["question"], "context": r["context"], "answer": r["answers"]} for r in gt_data]
+    else:
+        # Load filtered dataset from SQuAD
+        print("Creating new ground truth data...")
+        data = long_ans_squad(min_ans_size, max_dataset_size)
+        # Create and save ground truth data
+        gt_data = [{"question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
+        with open(gt_path, "w", encoding="utf-8") as f:
+            json.dump(gt_data, f, ensure_ascii=False, indent=4)
+        print(f"Saved ground truth data to {gt_path}")
+
+    return data
+
+
 def main():
     args = parse_args()
 
     template = read_template(args.template_path)
     model = LLMRunner(args.model)
 
-    # Load filtered dataset
-    data = long_ans_squad(args.min_ans_size, args.max_dataset_size)
-
-    # Create output directory
-    ensure_created_directory(args.extracted_data_path)
-
-    # Save ground truth
-    gt_data = [{"question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
-    gt_path = os.path.join(args.extracted_data_path, "gt.json")
-    with open(gt_path, "w", encoding="utf-8") as f:
-        json.dump(gt_data, f, ensure_ascii=False, indent=4)
-    print(f"Saved ground truth data to {gt_path}")
+    data = load_or_create_gt_data(
+        args.extracted_data_path,
+        args.min_ans_size,
+        args.max_dataset_size
+    )
 
     generation_methods = {
-        "standard": generate_standard_answers,
-        "standard_custom_decode": generate_standard_answers_custom_decode,
-        "parallel": generate_parallel_answers,
+        "standard": functools.partial(generate_standard_answers),
+        "standard_custom_decode": functools.partial(generate_standard_answers_custom_decode),
+        "parallel": functools.partial(generate_parallel_answers, one_char=True),
+        "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False)
     }
-
     common_params = {
         "model": model,
         "data": data,
@@ -300,13 +325,14 @@ def main():
     methods_to_run = generation_methods.keys() if args.method == 'all' else [args.method]
 
     for method_name in methods_to_run:
-        if method_name in generation_methods:
-            run_and_save_results(
-                method_name,
-                generation_methods[method_name],
-                args.extracted_data_path,
-                **common_params
-            )
+        assert method_name in generation_methods, f"'{method_name}' method is not implemented."
+
+        run_and_save_results(
+            method_name,
+            generation_methods[method_name],
+            args.extracted_data_path,
+            **common_params
+        )
 
 
 if __name__ == "__main__":
