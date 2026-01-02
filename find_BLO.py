@@ -53,30 +53,29 @@ class ByteLevelOracle:
         }
 
     def find_prefix_overlaps(self, target_bytes):
-        prefix_overlaps = []
+        prefix_overlaps = {}
         for tok_id, b in self.token_bytes.items():
             max_k = min(len(b), len(target_bytes) - 1)
             for k in range(1, max_k + 1):
                 if b[-k:] == target_bytes[:k]:
-                    prefix_overlaps.append((tok_id, k))
+                    prefix_overlaps[tok_id] = k
                     break
         return prefix_overlaps
 
     def find_containment_tokens(self, target_bytes):
-        containment = [
-            tok_id for tok_id, b in self.token_bytes.items()
+        containment = {
+            tok_id: True for tok_id, b in self.token_bytes.items()
             if target_bytes in b
-        ]
+        }
         return containment
 
     def get_generating_tokens(self, target_utf):
         target_bytes = target_utf.encode("utf-8")
         prefix_overlaps = self.find_prefix_overlaps(target_bytes)
         containment = self.find_containment_tokens(target_bytes)
-        # Extracting token_id from prefix_overlaps tuples
-        prefix_overlap_tokens = [item[0] for item in prefix_overlaps]
-        # Merging and removing duplicates
-        generating_tokens = list(set(prefix_overlap_tokens + containment))
+        
+        # Merging keys from both dictionaries and removing duplicates
+        generating_tokens = list(set(prefix_overlaps.keys()) | set(containment.keys()))
         return generating_tokens
 
 def bytes_to_hex(b: bytes) -> str:
@@ -85,6 +84,17 @@ def bytes_to_hex(b: bytes) -> str:
 def safe_utf8(b: bytes) -> str:
     """Best-effort UTF-8 decoding (shows  for invalid sequences)."""
     return b.decode("utf-8", errors="replace")
+
+def print_token_info(tok_id, oracle, k=None):
+    b = oracle.token_bytes[tok_id]
+    tok_str = oracle.id_to_token[tok_id]
+    print(f"Token ID     : {tok_id}")
+    print(f"Token string : {repr(tok_str)}")
+    print(f"Token UTF    : {repr(safe_utf8(b))}")
+    print(f"Token bytes  : {bytes_to_hex(b)}")
+    if k is not None:
+        print(f"Overlap size : {k} byte(s)")
+        print(f"Overlap bytes: {bytes_to_hex(b[-k:])}")
 
 def print_results(oracle, TARGET_UTF):
     target_bytes = TARGET_UTF.encode("utf-8")
@@ -114,15 +124,8 @@ def print_results(oracle, TARGET_UTF):
     if not prefix_overlaps:
         print("None found.")
     else:
-        for tok_id, k in sorted(prefix_overlaps, key=lambda x: -x[1]):
-            b = oracle.token_bytes[tok_id]
-            tok_str = oracle.id_to_token[tok_id]
-            print(f"Token ID     : {tok_id}")
-            print(f"Token string : {repr(tok_str)}")
-            print(f"Token UTF    : {repr(safe_utf8(b))}")
-            print(f"Token bytes  : {bytes_to_hex(b)}")
-            print(f"Overlap size : {k} byte(s)")
-            print(f"Overlap bytes: {bytes_to_hex(b[-k:])}")
+        for tok_id, k in sorted(prefix_overlaps.items(), key=lambda x: -x[1]):
+            print_token_info(tok_id, oracle, k)
             print("-" * 60)
 
     # ---------- Containment ----------
@@ -135,12 +138,7 @@ def print_results(oracle, TARGET_UTF):
         print("None found.")
     else:
         for tok_id in containment:
-            b = oracle.token_bytes[tok_id]
-            tok_str = oracle.id_to_token[tok_id]
-            print(f"Token ID    : {tok_id}")
-            print(f"Token string: {repr(tok_str)}")
-            print(f"Token UTF   : {repr(safe_utf8(b))}")
-            print(f"Token bytes : {bytes_to_hex(b)}")
+            print_token_info(tok_id, oracle)
             print("-" * 60)
 
 if __name__ == "__main__":
