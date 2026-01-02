@@ -78,7 +78,7 @@ def encode_with_llm(template, context):
     return torch.rand(len(context))
 
 
-def max_insert(logits, insert_token_id):
+def find_max_pos(logits, insert_token_id):
     # In real use, scatter logits and return argmax
     selected_logits = logits[:, :, insert_token_id]
     pos = torch.argmax(logits[:, :, insert_token_id], dim=-1).item()
@@ -182,14 +182,14 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
         )
 
         logits = model.encode_ctx(prompt, context)
-        start = max_insert(logits, start_span_token_id)
-        start_context, end_context = model.split_context_by_tokens(context, start)
+        start = find_max_pos(logits, start_span_token_id)
+        start_context, end_context = model.split_context_by_token_pos(context, start)
         start_context = start_context + start_span_token
 
         prompt_ctx = prompt + start_context
         logits = model.encode_ctx(prompt_ctx, end_context)
-        end = max_insert(logits, end_span_token_id)
-        end_start, end_end = model.split_context_by_tokens(end_context, end)
+        end = find_max_pos(logits, end_span_token_id)
+        end_start, end_end = model.split_context_by_token_pos(end_context, end)
         annotated = start_context + end_start + end_span_token + end_end
 
         answer = extract_span(start_span_token, end_span_token, annotated)
