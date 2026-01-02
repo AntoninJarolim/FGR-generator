@@ -55,6 +55,19 @@ def main():
     else:
         print("Skipping 'standard' method: file not found.")
 
+    # Evaluate standard custom decoding method
+    standard_path = os.path.join(args.input_dir, "standard_custom_decode.json")
+    if os.path.exists(standard_path):
+        with open(standard_path, 'r', encoding='utf-8') as f:
+            standard_data = json.load(f)
+
+        print("Evaluating 'standard' method...")
+        std_f1, std_em = evaluate(standard_data, ground_truths_map)
+        print(f"  Average F1 Score: {std_f1:.4f}")
+        print(f"  Average Exact Match Score: {std_em:.4f}")
+    else:
+        print("Skipping 'standard' method: file not found.")
+
     # Evaluate parallel method
     parallel_path = os.path.join(args.input_dir, "parallel.json")
     if os.path.exists(parallel_path):
