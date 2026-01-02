@@ -1,6 +1,7 @@
 import functools
 import argparse
 import os.path
+import uuid
 
 import torch
 import json
@@ -119,8 +120,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
 
         results.append(
             {
-                "question": record["question"],
-                "context": record["context"],
+                **record,
                 "prediction": answer,
                 "raw_output": generated,
             }
@@ -148,8 +148,7 @@ def generate_standard_answers_custom_decode(model, data, start_span_token, end_s
 
         results.append(
             {
-                "question": record["question"],
-                "context": record["context"],
+                **record,
                 "prediction": answer,
                 "raw_output": generated,
             }
@@ -211,8 +210,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
         answer = extract_span(start_span_str, end_span_str, annotated)
         results.append(
             {
-                "question": question,
-                "context": context,
+                **record,
                 "prediction": answer,
                 "raw_output": annotated,
             }
@@ -230,7 +228,8 @@ def remove_special_tokens(data, end_span_token, start_span_token):
                     remove_special_token(a, start_span_token, end_span_token)
                     for a in record["answer"]
                 ],
-                "context": remove_special_token(record["context"], start_span_token, end_span_token)
+                "context": remove_special_token(record["context"], start_span_token, end_span_token),
+                "id": record["id"]
             }
         )
     return data_removed_special
@@ -268,30 +267,47 @@ def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
 
 def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
     """
-    Loads ground truth data if it exists, otherwise creates it.
+    Loads ground truth data if it exists and has IDs, otherwise creates it.
     Returns the dataset in the format required for generation functions.
     """
     gt_path = os.path.join(output_dir, "gt.json")
-
-    # Ensure the output directory exists
     ensure_created_directory(output_dir)
 
+    regenerate = False
     if os.path.exists(gt_path):
-        print(f"Ground truth file '{gt_path}' already exists. Loading it.")
-        print("Ignoring dataset creation arguments (--min_ans_size, --max_dataset_size).")
-        with open(gt_path, 'r', encoding='utf-8') as f:
-            gt_data = json.load(f)
-        # Re-create the 'data' structure as it's used by generation functions
-        data = [{"question": r["question"], "context": r["context"], "answer": r["answers"]} for r in gt_data]
+        try:
+            with open(gt_path, 'r', encoding='utf-8') as f:
+                gt_data = json.load(f)
+            if not isinstance(gt_data, list) or not gt_data or 'id' not in gt_data[0]:
+                print("Found existing ground truth file, but it's missing IDs or is invalid. Regenerating...")
+                regenerate = True
+        except (json.JSONDecodeError, IndexError):
+            print("Found corrupted or empty ground truth file. Regenerating...")
+            regenerate = True
     else:
-        # Load filtered dataset from SQuAD
-        print("Creating new ground truth data...")
-        data = long_ans_squad(min_ans_size, max_dataset_size)
-        # Create and save ground truth data
-        gt_data = [{"question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
+        # File doesn't exist, so we need to generate it
+        regenerate = True
+
+    if regenerate:
+        print("Creating new ground truth data with unique IDs...")
+        squad_data = long_ans_squad(min_ans_size, max_dataset_size)
+
+        data = []
+        for record in squad_data:
+            record['id'] = uuid.uuid4().hex
+            data.append(record)
+
+        gt_data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
+        gt_data.sort(key=lambda x: x['id']) # Sort by ID for consistent order
         with open(gt_path, "w", encoding="utf-8") as f:
             json.dump(gt_data, f, ensure_ascii=False, indent=4)
-        print(f"Saved ground truth data to {gt_path}")
+        print(f"Saved new ground truth data with IDs to {gt_path}")
+    else:
+        print(f"Ground truth file '{gt_path}' with IDs already exists. Loading it.")
+        print("Ignoring dataset creation arguments (--min_ans_size, --max_dataset_size).")
+        # gt_data is already loaded from the check above.
+        # Re-create the 'data' structure as it's used by generation functions
+        data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answer": r["answers"]} for r in gt_data]
 
     return data
 
