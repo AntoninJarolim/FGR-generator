@@ -38,7 +38,7 @@ unicode_to_bytes_dict = {ord(v): k for k, v in bytes_to_unicode().items()}
 def unicode_to_bytes(target):
     return unicode_to_bytes_dict[target]
 
-class ByteLevelOracle:
+class TokenByteFinder:
     def __init__(self, tokenizer):
         if isinstance(tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
@@ -151,7 +151,7 @@ if __name__ == "__main__":
 
     TARGET_UTF =  "—" # "‡"  # try: "€", "—", "🙂", "\u0301"
 
-    oracle = ByteLevelOracle(MODEL_NAME)
+    oracle = TokenByteFinder(MODEL_NAME)
     
     # The get_generating_tokens method can be used to get the combined list of tokens
     generating_tokens = oracle.get_generating_tokens(TARGET_UTF)
