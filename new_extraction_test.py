@@ -9,6 +9,7 @@ from jinja2 import Template
 
 from datasets import load_dataset
 
+from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
 
 
@@ -63,12 +64,12 @@ def create_prompt(template, **kwargs):
     return template.render(**kwargs)
 
 
-def extract_span(start_token, end_token, generated_text):
+def extract_span(start_str, end_str, generated_text):
     """Extract text between start and end tokens."""
-    start_idx = generated_text.find(start_token)
-    end_idx = generated_text.find(end_token, start_idx + 1)
+    start_idx = generated_text.find(start_str)
+    end_idx = generated_text.find(end_str, start_idx + 1)
     if start_idx != -1 and end_idx != -1:
-        return generated_text[start_idx + len(start_token):end_idx]
+        return generated_text[start_idx + len(start_str):end_idx]
     return ""
 
 
@@ -78,10 +79,14 @@ def encode_with_llm(template, context):
     return torch.rand(len(context))
 
 
-def find_max_pos(logits, insert_token_id):
-    # In real use, scatter logits and return argmax
-    selected_logits = logits[:, :, insert_token_id]
-    pos = torch.argmax(logits[:, :, insert_token_id], dim=-1).item()
+def find_max_pos(logits, insert_token_ids):
+    # logits is Batch, Time, Vocab
+
+    # Max over tokens that could generate the token we care about
+    selected_logits = torch.max(logits[:, :, insert_token_ids], dim=-1).values
+
+    # get the position
+    pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
 
@@ -162,12 +167,21 @@ def read_template(path):
 # Main function
 # -----------------------------
 
-def generate_parallel_answers(model, data, template, start_span_token, end_span_token):
-    results = []
-    start_span_token_id = model.tokenize_char(start_span_token)
-    end_span_token_id = model.tokenize_char(end_span_token)
+def generate_parallel_answers(model, data, template, start_span_token, end_span_token, one_char=True):
+    start_span_str = start_span_token
+    end_span_str = end_span_token
 
-    data = remove_special_tokens(data, end_span_token, start_span_token)
+    results = []
+
+    if one_char:
+        start_span_tokens_id = model.tokenize_char(start_span_str)
+        end_span_tokens_id = model.tokenize_char(end_span_str)
+    else:
+        tokens_finder = TokenByteFinder(model.tokenizer)
+        start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
+        end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
+
+    data = remove_special_tokens(data, end_span_str, start_span_str)
 
     for record in tqdm.tqdm(data):
         context = record['context']
@@ -175,24 +189,24 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
 
         prompt = create_prompt(
             template,
-            start_span_token=start_span_token,
-            end_span_token=end_span_token,
+            start_span_token=start_span_str,
+            end_span_token=end_span_str,
             question=question,
             context=context
         )
 
         logits = model.encode_ctx(prompt, context)
-        start = find_max_pos(logits, start_span_token_id)
+        start = find_max_pos(logits, start_span_tokens_id)
         start_context, end_context = model.split_context_by_token_pos(context, start)
-        start_context = start_context + start_span_token
+        start_context = start_context + start_span_str
 
         prompt_ctx = prompt + start_context
         logits = model.encode_ctx(prompt_ctx, end_context)
-        end = find_max_pos(logits, end_span_token_id)
+        end = find_max_pos(logits, end_span_tokens_id)
         end_start, end_end = model.split_context_by_token_pos(end_context, end)
-        annotated = start_context + end_start + end_span_token + end_end
+        annotated = start_context + end_start + end_span_str + end_end
 
-        answer = extract_span(start_span_token, end_span_token, annotated)
+        answer = extract_span(start_span_str, end_span_str, annotated)
         results.append(
             {
                 "question": question,

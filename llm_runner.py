@@ -27,7 +27,7 @@ class LLMRunner:
         tokenized = self.tokenizer(character, return_tensors="pt", add_special_tokens=False)
         assert len(tokenized["input_ids"][0]) == 1, "This character is not tokenized as one token."
 
-        return tokenized["input_ids"][0][0]
+        return tokenized["input_ids"][0]
 
     def tokenize_run(self, prompt: str) -> str:
         """
