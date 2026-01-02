@@ -42,44 +42,36 @@ def main():
         
     ground_truths_map = {(item["question"], item["context"]): item["answers"] for item in gt_data}
 
-    # Evaluate standard method
-    standard_path = os.path.join(args.input_dir, "standard.json")
-    if os.path.exists(standard_path):
-        with open(standard_path, 'r', encoding='utf-8') as f:
-            standard_data = json.load(f)
-        
-        print("Evaluating 'standard' method...")
-        std_f1, std_em = evaluate(standard_data, ground_truths_map)
-        print(f"  Average F1 Score: {std_f1:.4f}")
-        print(f"  Average Exact Match Score: {std_em:.4f}")
-    else:
-        print("Skipping 'standard' method: file not found.")
+    # Find and evaluate all prediction files in the input directory
+    prediction_files = [f for f in os.listdir(args.input_dir) if f.endswith('.json') and f != 'gt.json']
 
-    # Evaluate standard custom decoding method
-    standard_path = os.path.join(args.input_dir, "standard_custom_decode.json")
-    if os.path.exists(standard_path):
-        with open(standard_path, 'r', encoding='utf-8') as f:
-            standard_data = json.load(f)
+    if not prediction_files:
+        print("\nNo prediction files (ending in .json, excluding gt.json) found to evaluate.")
 
-        print("Evaluating 'standard' method...")
-        std_f1, std_em = evaluate(standard_data, ground_truths_map)
-        print(f"  Average F1 Score: {std_f1:.4f}")
-        print(f"  Average Exact Match Score: {std_em:.4f}")
-    else:
-        print("Skipping 'standard' method: file not found.")
+    for filename in sorted(prediction_files):  # sorted for consistent order
+        method_name = os.path.splitext(filename)[0]
+        file_path = os.path.join(args.input_dir, filename)
 
-    # Evaluate parallel method
-    parallel_path = os.path.join(args.input_dir, "parallel.json")
-    if os.path.exists(parallel_path):
-        with open(parallel_path, 'r', encoding='utf-8') as f:
-            parallel_data = json.load(f)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                predictions = json.load(f)
 
-        print("\nEvaluating 'parallel' method...")
-        par_f1, par_em = evaluate(parallel_data, ground_truths_map)
-        print(f"  Average F1 Score: {par_f1:.4f}")
-        print(f"  Average Exact Match Score: {par_em:.4f}")
-    else:
-        print("\nSkipping 'parallel' method: file not found.")
+            print(f"\nEvaluating '{method_name}' method from '{filename}'...")
+            if not predictions:
+                print("  File is empty or contains no predictions. Skipping.")
+                continue
+
+            f1, em = evaluate(predictions, ground_truths_map)
+            print(f"  Average F1 Score: {f1:.4f}")
+            print(f"  Average Exact Match Score: {em:.4f}")
+
+        except FileNotFoundError:
+            # This case is unlikely due to os.listdir, but good practice
+            print(f"\nError: File not found at {file_path}. Skipping.")
+        except json.JSONDecodeError:
+            print(f"\nError: Could not decode JSON from {file_path}. Skipping.")
+        except Exception as e:
+            print(f"\nAn unexpected error occurred with {file_path}: {e}")
 
 
 if __name__ == "__main__":
