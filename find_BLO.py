@@ -33,67 +33,70 @@ def bytes_to_unicode():
     cs = [chr(n) for n in cs]
     return dict(zip(bs, cs))
 
-
 unicode_to_bytes_dict = {ord(v): k for k, v in bytes_to_unicode().items()}
-
 
 def unicode_to_bytes(target):
     return unicode_to_bytes_dict[target]
 
+class ByteLevelOracle:
+    def __init__(self, tokenizer):
+        if isinstance(tokenizer, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        else:
+            self.tokenizer = tokenizer
 
-def show_bytes_list(label, ids, tokenizer_instance):
-    print(f"Label {label}")
-    ids = [ids] + ids
+        self.vocab = self.tokenizer.get_vocab()
+        self.id_to_token = {idx: tok for tok, idx in self.vocab.items()}
+        self.token_bytes = {
+            t_id: bytes([unicode_to_bytes(ord(t_char)) for t_char in t])
+            for t, t_id in self.vocab.items()
+        }
 
-    for id_i in ids:
-        tok_str = tokenizer_instance.convert_ids_to_tokens(id_i)
-        if type(tok_str) != list:
-            tok_str = [tok_str]
+    def find_prefix_overlaps(self, target_bytes):
+        prefix_overlaps = []
+        for tok_id, b in self.token_bytes.items():
+            max_k = min(len(b), len(target_bytes) - 1)
+            for k in range(1, max_k + 1):
+                if b[-k:] == target_bytes[:k]:
+                    prefix_overlaps.append((tok_id, k))
+                    break
+        return prefix_overlaps
 
-        for t in tok_str:
-            b = t.encode("utf-8", errors="surrogatepass")
-            print(f"id={id_i}, bytes={[hex(x) for x in b]}, tok_str={t}")
+    def find_containment_tokens(self, target_bytes):
+        containment = [
+            tok_id for tok_id, b in self.token_bytes.items()
+            if target_bytes in b
+        ]
+        return containment
 
-
-def show_bytes(label, ids, token_bytes_map):  # Added token_bytes_map as argument
-    bytes_list = [token_bytes_map[id_i] for id_i in ids]
-    print(f"Label {label}, ids={ids}, bytes={bytes_list}")
-
+    def get_generating_tokens(self, target_utf):
+        target_bytes = target_utf.encode("utf-8")
+        prefix_overlaps = self.find_prefix_overlaps(target_bytes)
+        containment = self.find_containment_tokens(target_bytes)
+        # Extracting token_id from prefix_overlaps tuples
+        prefix_overlap_tokens = [item[0] for item in prefix_overlaps]
+        # Merging and removing duplicates
+        generating_tokens = list(set(prefix_overlap_tokens + containment))
+        return generating_tokens
 
 def bytes_to_hex(b: bytes) -> str:
     return " ".join(f"0x{byte:02x}" for byte in b)
-
 
 def safe_utf8(b: bytes) -> str:
     """Best-effort UTF-8 decoding (shows  for invalid sequences)."""
     return b.decode("utf-8", errors="replace")
 
+def print_results(oracle, TARGET_UTF):
+    target_bytes = TARGET_UTF.encode("utf-8")
+    prefix_overlaps = oracle.find_prefix_overlaps(target_bytes)
+    containment = oracle.find_containment_tokens(target_bytes)
 
-def find_prefix_overlaps(token_bytes, target_bytes):
-    prefix_overlaps = []
-    for tok_id, b in token_bytes.items():
-        max_k = min(len(b), len(target_bytes) - 1)
-        for k in range(1, max_k + 1):
-            if b[-k:] == target_bytes[:k]:
-                prefix_overlaps.append((tok_id, k))
-                break
-    return prefix_overlaps
-
-
-def find_containment_tokens(token_bytes, target_bytes):
-    containment = [
-        tok_id for tok_id, b in token_bytes.items()
-        if target_bytes in b
-    ]
-    return containment
-
-
-def print_results(MODEL_NAME, TARGET_UTF, target_bytes, prefix_overlaps, containment, token_bytes, id_to_token,
-                  bytes_to_hex, safe_utf8):
     print("=" * 80)
     print("MODEL")
     print("=" * 80)
-    print(MODEL_NAME)
+    # The model name is not stored in the oracle, so it can't be printed here.
+    # If needed, it should be passed as an argument.
+    # print(oracle.model_name)
     print()
 
     print("=" * 80)
@@ -112,8 +115,8 @@ def print_results(MODEL_NAME, TARGET_UTF, target_bytes, prefix_overlaps, contain
         print("None found.")
     else:
         for tok_id, k in sorted(prefix_overlaps, key=lambda x: -x[1]):
-            b = token_bytes[tok_id]
-            tok_str = id_to_token[tok_id]
+            b = oracle.token_bytes[tok_id]
+            tok_str = oracle.id_to_token[tok_id]
             print(f"Token ID     : {tok_id}")
             print(f"Token string : {repr(tok_str)}")
             print(f"Token UTF    : {repr(safe_utf8(b))}")
@@ -132,50 +135,29 @@ def print_results(MODEL_NAME, TARGET_UTF, target_bytes, prefix_overlaps, contain
         print("None found.")
     else:
         for tok_id in containment:
-            b = token_bytes[tok_id]
-            tok_str = id_to_token[tok_id]
+            b = oracle.token_bytes[tok_id]
+            tok_str = oracle.id_to_token[tok_id]
             print(f"Token ID    : {tok_id}")
             print(f"Token string: {repr(tok_str)}")
             print(f"Token UTF   : {repr(safe_utf8(b))}")
             print(f"Token bytes : {bytes_to_hex(b)}")
             print("-" * 60)
 
-
-def main():
-    MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-    TARGET_UTF = "—"  # "‡"  # try: "€", "—", "🙂", "\u0301"
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_NAME,
-    )
-
-    vocab = tokenizer.get_vocab()
-    id_to_token = {idx: tok for tok, idx in vocab.items()}
-
-    token_bytes = {
-        t_id: bytes([unicode_to_bytes(ord(t_char)) for t_char in t])
-        for t, t_id in vocab.items()
-    }
-
-    target_bytes = TARGET_UTF.encode("utf-8")
-
-    space_id = tokenizer(" ", add_special_tokens=False)["input_ids"]
-    special_id = tokenizer("‡", add_special_tokens=False)["input_ids"]
-    both_id = tokenizer(" ‡", add_special_tokens=False)["input_ids"]
-    # Removed the redundant assignment "space_id, special_id, both_id"
-
-    print(f"Target bytes: {target_bytes}")
-
-    show_bytes("space", space_id, token_bytes)
-    show_bytes("special", special_id, token_bytes)
-    show_bytes("both", both_id, token_bytes)
-
-    prefix_overlaps = find_prefix_overlaps(token_bytes, target_bytes)
-    containment = find_containment_tokens(token_bytes, target_bytes)
-
-    print_results(MODEL_NAME, TARGET_UTF, target_bytes, prefix_overlaps, containment, token_bytes, id_to_token,
-                  bytes_to_hex, safe_utf8)
-
-
 if __name__ == "__main__":
-    main()
+    MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+    # Examples:
+    #   "meta-llama/Llama-2-7b-hf"
+    #   "mistralai/Mistral-7B-v0.1"
+    #   "gpt2"
+    #   "EleutherAI/gpt-neox-20b"
+
+    TARGET_UTF =  "—" # "‡"  # try: "€", "—", "🙂", "\u0301"
+
+    oracle = ByteLevelOracle(MODEL_NAME)
+    
+    # The get_generating_tokens method can be used to get the combined list of tokens
+    generating_tokens = oracle.get_generating_tokens(TARGET_UTF)
+    # print(f"Generating Tokens: {generating_tokens}")
+
+    # The printing of results is done by calling print_results
+    print_results(oracle, TARGET_UTF)
