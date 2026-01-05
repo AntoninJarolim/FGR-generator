@@ -34,6 +34,15 @@ def bytes_to_unicode():
     return dict(zip(bs, cs))
 
 
+def encode_str_utf8(any_string):
+    if type(any_string) == str:
+        return any_string.encode("utf-8")
+    elif type(any_string) == bytes:
+        return any_string
+    else:
+        raise TypeError()
+
+
 class TokenByteFinder:
     def __init__(self, tokenizer):
         if isinstance(tokenizer, str):
@@ -51,6 +60,8 @@ class TokenByteFinder:
         }
 
     def find_prefix_overlaps(self, target_bytes):
+        target_bytes = encode_str_utf8(target_bytes)
+
         prefix_overlaps = {}
         for tok_id, b in self.token_bytes.items():
             max_k = min(len(b), len(target_bytes) - 1)
@@ -61,14 +72,16 @@ class TokenByteFinder:
         return prefix_overlaps
 
     def find_containment_tokens(self, target_bytes):
+        target_bytes = encode_str_utf8(target_bytes)
+
         containment = {
             tok_id: True for tok_id, b in self.token_bytes.items()
             if target_bytes in b
         }
         return containment
 
-    def get_generating_tokens(self, target_utf):
-        target_bytes = target_utf.encode("utf-8")
+    def get_generating_tokens(self, any_string):
+        target_bytes = encode_str_utf8(any_string)
         prefix_overlaps = self.find_prefix_overlaps(target_bytes)
         containment = self.find_containment_tokens(target_bytes)
         
