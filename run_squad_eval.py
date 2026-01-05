@@ -77,7 +77,7 @@ def main():
             # Get detailed results
             detailed_results = evaluate(predictions, ground_truths_map)
             
-            if method_name in ["standard", "parallel_multiple"]:
+            if method_name in ["standard", "parallel_multiple_diff"]:
                  results_by_method[method_name] = detailed_results
 
             # Calculate and print averages
@@ -99,9 +99,9 @@ def main():
             print(f"\nAn unexpected error occurred with {filename}: {e}")
 
     # Comparison logic
-    if "standard" in results_by_method and "parallel_multiple" in results_by_method:
+    if "standard" in results_by_method and "parallel_multiple_diff" in results_by_method:
         standard_results = results_by_method["standard"]
-        parallel_results = results_by_method["parallel_multiple"]
+        parallel_results = results_by_method["parallel_multiple_diff"]
 
         differences = []
         common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
@@ -127,7 +127,7 @@ def main():
 
         differences.sort(key=lambda x: x["diff"], reverse=True)
 
-        print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple) ---")
+        print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple_diff) ---")
         for i, item in enumerate(differences[:30]):
             print(f"\n--- Example {i+1} (Diff: {item['diff']:.4f}) ---")
             print(f"Question: {item['question']}")
@@ -136,7 +136,7 @@ def main():
             print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
             print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
     else:
-        print("\nSkipping comparison: 'standard' and/or 'parallel_multiple' results not found.")
+        print("\nSkipping comparison: 'standard' and/or 'parallel_multiple_diff' results not found.")
 
 
 if __name__ == "__main__":
