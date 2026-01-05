@@ -149,6 +149,55 @@ class LLMRunner:
 
         return outputs['logits'][:, -context_len-1:]
 
+    def encode_ctx_diff(self, template, context) -> str:
+        # tokenize template and context independently
+        tmpl_enc = self.tokenizer(
+            template,
+            add_special_tokens=False,
+            return_tensors="pt"
+        )
+
+        if context[0] != " ":
+            context = " " + context
+
+        ctx_enc = self.tokenizer(
+            context,
+            add_special_tokens=False,
+            return_tensors="pt"
+        )
+
+        context_len = ctx_enc["input_ids"].size(1)
+
+        input_ids = torch.cat(
+            [tmpl_enc["input_ids"], ctx_enc["input_ids"]],
+            dim=1
+        ).to(self.device)
+        outputs = self.model(input_ids=input_ids)
+
+        # add eos and shift to right by one
+        # Context has size X
+        context_ids = input_ids[:, -context_len:]
+
+        # GT_ids has size X+1, cuz we add EOS to the right
+        GT_ids = self.append_eos_token_id(context_ids)
+
+        # output_logits has size X+1, cuz we add logit from ctx_len-1 token
+        output_logits = outputs['logits'][:, -context_len-1:]
+
+        # Unsqueeze to match size of output_logits
+        gt_logits = output_logits.gather(dim=-1, index=GT_ids.unsqueeze(-1))
+
+        predicted_ids = torch.argmax(output_logits, dim=-1)
+
+        return output_logits - gt_logits, predicted_ids
+
+
+    def append_eos_token_id(self, tokens):
+        eos_id = self.tokenizer.eos_token_id
+        eos = torch.tensor([[eos_id]], device=tokens.device)
+        ret = torch.cat([tokens, eos], dim=1)
+        return ret
+
     def split_context_by_token_pos(self, text: str, start_context: int):
         """
         Returns text split by position of token given by start_context parameter

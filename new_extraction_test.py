@@ -15,7 +15,6 @@ from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
 
 
-
 def long_ans_squad(min_ans_size, max_dataset_size):
     """
     Load SQuAD dataset and filter answers longer than min_ans_size words.
@@ -92,6 +91,40 @@ def find_max_pos(logits, insert_token_ids):
     pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
+def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None):
+    # logits is Batch, Time, Vocab
+
+    # Max over tokens that could generate the token we care about
+    selected_logits = torch.max(logits[:, :, insert_token_ids], dim=-1).values
+
+    # get the position
+    non_zero = (selected_logits[0] > 0).nonzero(as_tuple=True)[0]
+    if len(non_zero) > 0:
+        pos = non_zero[0].item()
+    else:
+        pos = logits.size(1) - 1 # Last position, 0 dim is batch, -1 for correct indexing
+
+    show_it = True
+    if show_it:
+        values = selected_logits[0].cpu()
+        import matplotlib.pyplot as plt
+
+        plt.plot(range(len(values)), values, marker='o', label="Values")
+        # highlight the position
+        plt.plot(pos, values[pos], 'ro', markersize=4, label="First >0")
+
+        if len(values) < 10:
+            plt.xticks(range(len(values)))
+
+        plt.xlabel("Index")
+        plt.ylabel("Value")
+        plt.title(f"Values vs. Index for {plot_label}")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+    return pos
+
 
 def ensure_created_directory(path: str):
     if os.path.isdir(path):
@@ -159,6 +192,8 @@ def generate_standard_answers_custom_decode(model, data, start_span_token, end_s
 def read_template(path):
     with open(path, 'r') as f:
         template_text = f.read()
+        # if template_text[-1] != " ":
+        #     template_text += " "
     template = Template(template_text)
     template.template_text = template_text
     return template
@@ -218,6 +253,54 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
     return results
 
 
+def generate_parallel_answers_diff(model, data, template, start_span_token, end_span_token):
+    start_span_str = start_span_token
+    end_span_str = end_span_token
+
+    tokens_finder = TokenByteFinder(model.tokenizer)
+    start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
+    end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
+
+    data = remove_special_tokens(data, end_span_str, start_span_str)
+
+    results = []
+    for record in tqdm.tqdm(data):
+        context = record['context']
+        question = record['question']
+
+        prompt = create_prompt(
+            template,
+            start_span_token=start_span_str,
+            end_span_token=end_span_str,
+            question=question,
+            context=context
+        )
+
+        logits, predicted = model.encode_ctx_diff(prompt, context)
+        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start")
+        start_context, end_context = model.split_context_by_token_pos(context, start)
+
+        prompt_ctx = prompt + start_context + start_span_str
+        if end_context == "":
+            annotated = start_context + start_span_str + end_span_str
+        else:
+            logits, predicted = model.encode_ctx_diff(prompt_ctx, end_context)
+            end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end")
+            end_start, end_end = model.split_context_by_token_pos(end_context, end)
+            annotated = start_context + start_span_str + end_start + end_span_str + end_end
+
+        answer = extract_span(start_span_str, end_span_str, annotated)
+
+        results.append(
+            {
+                **record,
+                "prediction": answer,
+                "raw_output": annotated,
+            }
+        )
+    return results
+
+
 def remove_special_tokens(data, end_span_token, start_span_token):
     data_removed_special = []
     for record in tqdm.tqdm(data):
@@ -249,7 +332,9 @@ def parse_args():
                         help="Path to the directory to save extracted data.")
     parser.add_argument("--template_path", type=str, required=True, help="Path to the Jinja template.")
     parser.add_argument("--method", type=str,
-                        choices=['standard', 'parallel', 'parallel_multiple', 'standard_custom_decode', 'all'],
+                        choices=['standard', 'standard_custom_decode',
+                                 'parallel', 'parallel_multiple', 'parallel_multiple_diff',
+                                 'all'],
                         default='all',
                         help="Which method to run and save.")
     return parser.parse_args()
@@ -259,6 +344,7 @@ def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
     """Runs a generation function and saves the results to a JSON file."""
     print(f"Running '{method_name}' method...")
     results = generation_func(**kwargs)
+    results = sorted(results, key=lambda r: r["id"])
     output_path = os.path.join(output_dir, f"{method_name}.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
@@ -297,8 +383,9 @@ def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
             record['id'] = uuid.uuid4().hex
             data.append(record)
 
-        gt_data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answers": r["answer"]} for r in data]
-        gt_data.sort(key=lambda x: x['id']) # Sort by ID for consistent order
+        gt_data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answers": r["answer"]} for r in
+                   data]
+        gt_data.sort(key=lambda x: x['id'])  # Sort by ID for consistent order
         with open(gt_path, "w", encoding="utf-8") as f:
             json.dump(gt_data, f, ensure_ascii=False, indent=4)
         print(f"Saved new ground truth data with IDs to {gt_path}")
@@ -307,7 +394,8 @@ def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
         print("Ignoring dataset creation arguments (--min_ans_size, --max_dataset_size).")
         # gt_data is already loaded from the check above.
         # Re-create the 'data' structure as it's used by generation functions
-        data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answer": r["answers"]} for r in gt_data]
+        data = [{"id": r["id"], "question": r["question"], "context": r["context"], "answer": r["answers"]} for r in
+                gt_data]
 
     return data
 
@@ -328,7 +416,8 @@ def main():
         "standard": functools.partial(generate_standard_answers),
         "standard_custom_decode": functools.partial(generate_standard_answers_custom_decode),
         "parallel": functools.partial(generate_parallel_answers, one_char=True),
-        "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False)
+        "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
+        "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
     }
     common_params = {
         "model": model,
