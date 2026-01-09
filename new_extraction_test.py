@@ -91,11 +91,8 @@ def find_max_pos(logits, insert_token_ids):
     pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
-def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, allow_last=True):
+def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None):
     # logits is Batch, Time, Vocab
-
-    if not allow_last:
-        logits = logits[:, :-1, :]
 
     # Max over tokens that could generate the token we care about
     selected_logits = torch.max(logits[:, :, insert_token_ids], dim=-1).values
