@@ -91,8 +91,11 @@ def find_max_pos(logits, insert_token_ids):
     pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
-def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None):
+def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, allow_last=True):
     # logits is Batch, Time, Vocab
+
+    if not allow_last:
+        logits = logits[:, :-1, :]
 
     # Max over tokens that could generate the token we care about
     selected_logits = torch.max(logits[:, :, insert_token_ids], dim=-1).values
@@ -102,7 +105,8 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None):
     if len(non_zero) > 0:
         pos = non_zero[0].item()
     else:
-        pos = logits.size(1) - 1 # Last position, 0 dim is batch, -1 for correct indexing
+        # pos = logits.size(1) - 1 # Last position, 0 dim is batch, -1 for correct indexing
+        pos = torch.argmax(selected_logits, dim=-1).item()
 
     show_it = True
     if show_it:
@@ -277,7 +281,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         )
 
         logits, predicted = model.encode_ctx_diff(prompt, context)
-        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start")
+        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", allow_last=False)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
         prompt_ctx = prompt + start_context + start_span_str
