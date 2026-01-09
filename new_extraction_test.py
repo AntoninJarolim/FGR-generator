@@ -110,24 +110,28 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, allow_l
 
     show_it = True
     if show_it:
-        values = selected_logits[0].cpu()
-        import matplotlib.pyplot as plt
-
-        plt.plot(range(len(values)), values, marker='o', label="Values")
-        # highlight the position
-        plt.plot(pos, values[pos], 'ro', markersize=4, label="First >0")
-
-        if len(values) < 10:
-            plt.xticks(range(len(values)))
-
-        plt.xlabel("Index")
-        plt.ylabel("Value")
-        plt.title(f"Values vs. Index for {plot_label}")
-        plt.grid(True)
-        plt.legend()
-        plt.show()
+        plot_logits_at_positions(plot_label, pos, selected_logits)
 
     return pos
+
+
+def plot_logits_at_positions(plot_label, pos, selected_logits):
+    values = selected_logits[0].cpu()
+    import matplotlib.pyplot as plt
+
+    plt.plot(range(len(values)), values, marker='o', label="Values")
+    # highlight the position
+    plt.plot(pos, values[pos], 'ro', markersize=4, label="First >0")
+
+    if len(values) < 10:
+        plt.xticks(range(len(values)))
+
+    plt.xlabel("Index")
+    plt.ylabel("Value")
+    plt.title(f"Values vs. Index for {plot_label}")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
 
 
 def ensure_created_directory(path: str):
@@ -280,7 +284,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             context=context
         )
 
-        logits, predicted = model.encode_ctx_diff(prompt, context)
+        logits, predicted = model.encode_ctx(prompt, context)
         start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", allow_last=False)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
@@ -288,7 +292,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
         else:
-            logits, predicted = model.encode_ctx_diff(prompt_ctx, end_context)
+            logits, predicted = model.encode_ctx(prompt_ctx, end_context)
             end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end")
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
             annotated = start_context + start_span_str + end_start + end_span_str + end_end
