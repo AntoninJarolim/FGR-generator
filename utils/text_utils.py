@@ -56,3 +56,19 @@ def find_spans(text, selected_spans):
             }
         )
     return rationales
+
+
+def find_span(context: str, span: str) -> tuple[int, int]:
+    """
+    Finds the start and end positions of `span` inside `context`.
+
+    Returns:
+        (start_index, end_index)  where end_index is exclusive
+        Returns (-1, -1) if span is not found.
+    """
+    start = context.find(span)
+    if start == -1:
+        raise AssertionError(f"Span '{span}' was not found in the text: {context}")
+    end = start + len(span) - 1
+    return start, end
+

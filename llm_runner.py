@@ -1,15 +1,15 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-
+import numpy as np
 from utils.plotting_logits import plot_series
-
+import random
 
 class LLMRunner:
     def __init__(self, model_name, device=None, max_new_tokens=1024, do_sample=False):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
         )
 
         self.model.eval()
@@ -20,6 +20,22 @@ class LLMRunner:
 
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
+
+        # Disable processing logits in any wa
+        self.model.generation_config.top_k = 0
+        self.model.generation_config.top_p = 1.0
+        self.model.generation_config.temperature = 1.0
+        self.model.generation_config.do_sample = False
+
+        seed = 42
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
 
     def tokenize_char(self, character):
         assert len(character) == 1
@@ -39,12 +55,55 @@ class LLMRunner:
         # Generate output
         generated = self.model.generate(
             **inputs,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=self.do_sample
+            max_new_tokens=1,
+            do_sample=False,
+            temperature=1.0,
+            top_k=0,
+            top_p=1.0,
+            repetition_penalty=1.0,
+            no_repeat_ngram_size=0,
+            bad_words_ids=None,
+            output_scores=True,
+            return_dict_in_generate=True,
+            use_cache=True,
         )
 
+        logits = torch.stack(generated.scores, dim=1)
+        first_logits = generated.scores[0][0]
+        all_logits = self.model(**inputs).logits[0, -1, :]
+
+        print( torch.allclose(
+            first_logits,
+            all_logits.float(),
+            atol=1e-3
+        ))
+
+        print( torch.allclose(
+            first_logits,
+            all_logits.float(),
+            atol=1e-2
+        ))
+
+        a = first_logits
+        b = all_logits.float()
+
+        mask = ~torch.isclose(a, b, atol=1e-6)
+
+        idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
+
+        print("num differing:", idx.numel())
+        print("first 10 indices:", idx[:10])
+
+        for i in idx[:10]:
+            print(
+                i.item(),
+                a[i].item(),
+                b[i].item(),
+                (a[i] - b[i]).item()
+            )
+
         # Decode to string
-        return self.decode_generated(inputs, generated)
+        return logits, self.decode_generated(inputs, generated.sequences)
 
     def tokenize_run_custom(self, prompt: str, targets_text=None, special=None, teacher_forcing=False):
         """

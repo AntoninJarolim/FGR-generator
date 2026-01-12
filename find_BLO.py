@@ -89,6 +89,16 @@ class TokenByteFinder:
         generating_tokens = list(set(prefix_overlaps.keys()) | set(containment.keys()))
         return generating_tokens
 
+    def return_token_bytes(self, ids):
+        if type(ids) == int:
+            return self.token_bytes[ids]
+
+        if type(ids) == list:
+            return [self.token_bytes[i] for i in ids]
+
+        return None
+
+
 def bytes_to_hex(b: bytes) -> str:
     return " ".join(f"0x{byte:02x}" for byte in b)
 

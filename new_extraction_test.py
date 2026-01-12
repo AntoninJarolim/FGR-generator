@@ -10,9 +10,12 @@ import tqdm
 from jinja2 import Template
 
 from datasets import load_dataset
+from torch import newaxis
 
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
+from utils.logits_examine import print_topk_logits_decoded
+from utils.text_utils import find_span
 
 
 def long_ans_squad(min_ans_size, max_dataset_size):
@@ -91,37 +94,45 @@ def find_max_pos(logits, insert_token_ids):
     pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
-def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None):
+def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_range=None, start_index=0):
     # logits is Batch, Time, Vocab
 
-    # Max over tokens that could generate the token we care about
-    selected_logits = torch.max(logits[:, :, insert_token_ids], dim=-1).values
+    # Batch, Time, Vocab
+    greedy_next = torch.argmax(logits, dim=-1, keepdim=False).to("cpu")[..., newaxis]
+    insert_tag_ids = torch.tensor(insert_token_ids)[newaxis, newaxis, :]
+    in_generating = torch.eq(greedy_next, insert_tag_ids).any(dim=-1)
+    first_greater = torch.argmax(in_generating.type(torch.int), dim=-1).item()
 
-    # get the position
-    non_zero = (selected_logits[0] > 0).nonzero(as_tuple=True)[0]
-    if len(non_zero) > 0:
-        pos = non_zero[0].item()
-    else:
-        # pos = logits.size(1) - 1 # Last position, 0 dim is batch, -1 for correct indexing
-        pos = torch.argmax(selected_logits, dim=-1).item()
 
     show_it = True
     if show_it:
-        plot_logits_at_positions(plot_label, pos, selected_logits)
+        mask = torch.zeros(logits.size(-1)).type(torch.bool)
+        mask.scatter_(dim=-1, index=torch.tensor(insert_token_ids), value=1)
 
-    return pos
+        max_tag = torch.amax(logits[..., mask], dim=-1)
+        max_other = torch.amax(logits[..., ~mask], dim=-1)
 
+        logits_ = max_tag - max_other
 
-def plot_logits_at_positions(plot_label, pos, selected_logits):
+        plot_logits_at_positions(plot_label, first_greater, logits_, gt_range, start_at=start_index)
+
+    return first_greater
+
+def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_at):
     values = selected_logits[0].cpu()
     import matplotlib.pyplot as plt
 
-    plt.plot(range(len(values)), values, marker='o', label="Values")
-    # highlight the position
-    plt.plot(pos, values[pos], 'ro', markersize=4, label="First >0")
+    x = list(range(start_at, start_at + len(values)))
 
-    if len(values) < 10:
-        plt.xticks(range(len(values)))
+    plt.figure(figsize=(8, 4))
+    plt.plot(x, values, marker='o', label="Values")
+
+    plt.plot(pos + start_at, values[pos], 'ro', markersize=6, label="First >0")
+
+    plt.axvspan(gt_range[0], gt_range[1] - 1, color='green', alpha=0.3, label="GT span")
+
+    # correct limits
+    plt.xlim(0, start_at + len(values) - 1)
 
     plt.xlabel("Index")
     plt.ylabel("Value")
@@ -144,7 +155,14 @@ def ensure_created_directory(path: str):
 
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
     results = []
+
+    tokens_finder = TokenByteFinder(model.tokenizer)
+    start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_token)
+
     for record in tqdm.tqdm(data):
+        if record['question'] != 'What is strongly linked to good student-teacher relationships?':
+            continue
+
         prompt = create_prompt(
             template,
             start_span_token=start_span_token,
@@ -153,8 +171,16 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
             context=record["context"]
         )
 
-        generated = model.tokenize_run(prompt)
+        logits, generated = model.tokenize_run(prompt)
         answer = extract_span(start_span_token, end_span_token, generated)
+
+
+        print_topk_logits_decoded(
+            tokens_finder,
+            model.tokenizer,
+            logits,
+            start_span_tokens_id=start_span_tokens_id
+        )
 
         results.append(
             {
@@ -258,6 +284,19 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
     return results
 
 
+def get_token_span(tokenizer, text, char_span):
+    char_start, char_end = char_span
+    encodings = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+
+    token_start = encodings.char_to_token(char_start)
+    token_end = encodings.char_to_token(char_end)
+
+    assert token_end is not None
+    assert token_start is not None
+
+    return token_start, token_end
+
+
 def generate_parallel_answers_diff(model, data, template, start_span_token, end_span_token):
     start_span_str = start_span_token
     end_span_str = end_span_token
@@ -272,6 +311,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
     for record in tqdm.tqdm(data):
         context = record['context']
         question = record['question']
+        gt_span = get_token_span(model.tokenizer, context, find_span(context, record['answer'][0]))
 
         prompt = create_prompt(
             template,
@@ -281,16 +321,23 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             context=context
         )
 
-        logits, predicted = model.encode_ctx(prompt, context)
-        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", allow_last=False)
+        logits = model.encode_ctx(prompt, context)
+        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", gt_range=gt_span)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
         prompt_ctx = prompt + start_context + start_span_str
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
+            print_topk_logits_decoded(
+                tokens_finder,
+                model.tokenizer,
+                logits,
+                start_span_tokens_id=start_span_tokens_id,
+            )
+            pass
         else:
-            logits, predicted = model.encode_ctx(prompt_ctx, end_context)
-            end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end")
+            logits = model.encode_ctx(prompt_ctx, end_context)
+            end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end", gt_range=gt_span, start_index=start)
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
             annotated = start_context + start_span_str + end_start + end_span_str + end_end
 
