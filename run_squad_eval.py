@@ -32,6 +32,19 @@ def evaluate(predictions, ground_truths_map):
     return results
 
 
+def normalize_text(text):
+    return "".join(text.split())
+
+def check_is_valid(record, start_token, end_token):
+    raw_output = record.get("raw_output", "")
+    context = record.get("context", "")
+    
+    # Remove all instances of start/end tokens
+    # Note: If the model generates them multiple times or incorrectly, we remove them all to check if the base text is preserved.
+    cleaned_output = raw_output.replace(start_token, "").replace(end_token, "")
+    
+    return normalize_text(cleaned_output) == normalize_text(context)
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
     parser.add_argument("input_dir", help="Path to the directory with prediction files.")
@@ -67,11 +80,29 @@ def main():
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                predictions = json.load(f)
+                data_loaded = json.load(f)
+
+            predictions = data_loaded["results"]
+            params = data_loaded["parameters"]
+
+            start_span_token = params["start_span_token"]
+            end_span_token = params["end_span_token"]
 
             print(f"\nEvaluating '{method_name}' method from '{filename}'...")
+            
+            # Validation Step
+            valid_predictions = []
+            cheating_examples = []
+            for pred in predictions:
+                if check_is_valid(pred, start_span_token, end_span_token):
+                    valid_predictions.append(pred)
+                else:
+                    cheating_examples.append(pred)
+
+            predictions = valid_predictions
+
             if not predictions:
-                print("  File is empty or contains no predictions. Skipping.")
+                print("  No valid predictions remaining after validation. Skipping.")
                 continue
             
             # Get detailed results
@@ -93,6 +124,19 @@ def main():
             print(f"  Average F1 Score: {avg_f1:.4f}")
             print(f"  Average Exact Match Score: {avg_em:.4f}")
 
+            print_examples = False
+            if cheating_examples and print_examples:
+                print(f"\nThe LM cheated {len(cheating_examples)}/{len(cheating_examples) + len(predictions)} many times.")
+                print(f"{min(10, len(cheating_examples))} examples of cheating:")
+                for i, ex in enumerate(cheating_examples[:10]):
+                    raw_out = ex.get("raw_output", "")
+                    clean_out = raw_out.replace(start_span_token, "").replace(end_span_token, "")
+                    print(f"--- Example {i+1} ---")
+                    print(f"ID: {ex.get('id')}")
+                    print(f"Context (len={len(ex.get('context', ''))}): \033[91m{ex.get('context')}\033[0m...")
+                    print(f"Generated (len={len(raw_out)}): \033[91m{raw_out}\033[0m...")
+                    print(f"Cleaned (len={len(clean_out)}): \033[91m{clean_out}\033[0m...")
+
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"\nAn error occurred while processing {filename}: {e}. Skipping.")
         except Exception as e:
@@ -105,6 +149,7 @@ def main():
 
         differences = []
         common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
+        print(f"Length of Common  (standard and. parallel_multiple_diff): {len(common_keys)}")
 
         for key in common_keys:
             standard_f1 = standard_results[key]["f1"]
