@@ -1,6 +1,7 @@
 import json
 import argparse
 import os
+
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
 
 
@@ -35,15 +36,17 @@ def evaluate(predictions, ground_truths_map):
 def normalize_text(text):
     return "".join(text.split())
 
+
 def check_is_valid(record, start_token, end_token):
     raw_output = record.get("raw_output", "")
     context = record.get("context", "")
-    
+
     # Remove all instances of start/end tokens
     # Note: If the model generates them multiple times or incorrectly, we remove them all to check if the base text is preserved.
     cleaned_output = raw_output.replace(start_token, "").replace(end_token, "")
-    
+
     return normalize_text(cleaned_output) == normalize_text(context)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
@@ -58,7 +61,7 @@ def main():
     except FileNotFoundError:
         print(f"Error: Ground truth file not found at {gt_path}")
         return
-        
+
     ground_truths_map = {(item["question"], item["context"]): item["answers"] for item in gt_data}
 
     # Find and evaluate all prediction files in the input directory
@@ -67,49 +70,82 @@ def main():
     except FileNotFoundError:
         print(f"Error: Input directory not found at {args.input_dir}")
         return
-        
 
     if not prediction_files:
         print("\nNo prediction files (ending in .json, excluding gt.json) found to evaluate.")
+        return
 
-    results_by_method = {}
-
+    # 1. Load all method data
+    methods_data = {}
     for filename in sorted(prediction_files):
         method_name = os.path.splitext(filename)[0]
         file_path = os.path.join(args.input_dir, filename)
-
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data_loaded = json.load(f)
+            methods_data[method_name] = data_loaded
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"\nAn error occurred while loading {filename}: {e}. Skipping.")
 
-            predictions = data_loaded["results"]
-            params = data_loaded["parameters"]
+    if not methods_data:
+        print("No valid method data loaded.")
+        return
 
-            start_span_token = params["start_span_token"]
-            end_span_token = params["end_span_token"]
+    # 2. Find valid IDs from 'standard' method
+    assert "standard" in methods_data
+    reference_method = "standard"
 
-            print(f"\nEvaluating '{method_name}' method from '{filename}'...")
-            
-            # Validation Step
-            valid_predictions = []
-            cheating_examples = []
-            for pred in predictions:
-                if check_is_valid(pred, start_span_token, end_span_token):
-                    valid_predictions.append(pred)
-                else:
-                    cheating_examples.append(pred)
+    print(f"Using '{reference_method}' as the reference for valid IDs.")
 
-            predictions = valid_predictions
+    ref_data = methods_data[reference_method]
+    ref_preds = ref_data["results"]
+    ref_params = ref_data["parameters"]
+    start_span_token = ref_params["start_span_token"]
+    end_span_token = ref_params["end_span_token"]
 
-            if not predictions:
-                print("  No valid predictions remaining after validation. Skipping.")
-                continue
-            
+    assert all(
+        [
+            # start and end span tokens must match for valid comparison
+            data['parameters'] == methods_data[reference_method]['parameters']
+            for method_name, data in methods_data.items()
+         ]
+    )
+
+    valid_ids = set()
+    all_ids = set()
+
+    # Check for validity in reference method
+    cheating_count = 0
+    for pred in ref_preds:
+        pid = pred.get("id")
+        if pid:
+            all_ids.add(pid)
+            if check_is_valid(pred, start_span_token, end_span_token):
+                valid_ids.add(pid)
+            else:
+                cheating_count += 1
+
+    print(f"Found {len(valid_ids)} valid IDs out of {len(all_ids)} total in '{reference_method}'.")
+    if cheating_count > 0:
+        print(f"Excluded {cheating_count} cheating examples from comparison set.")
+
+    # Helper function to run evaluation on a specific set of IDs
+    def run_evaluation_on_ids(target_ids, label):
+        print(f"\n\n{'=' * 20} Running Evaluation: {label} {'=' * 20}")
+        print(f"Evaluating on {len(target_ids)} IDs.")
+
+        current_results_by_method = {}
+
+        for method_name, data in methods_data.items():
+            print(f"\nEvaluating '{method_name}'...")
+            predictions = data["results"]
+
+            # Filter predictions to only those in target_ids
+            filtered_preds = [p for p in predictions if p["id"] in target_ids]
+
             # Get detailed results
-            detailed_results = evaluate(predictions, ground_truths_map)
-            
-            if method_name in ["standard", "parallel_multiple_diff"]:
-                 results_by_method[method_name] = detailed_results
+            detailed_results = evaluate(filtered_preds, ground_truths_map)
+            current_results_by_method[method_name] = detailed_results
 
             # Calculate and print averages
             if not detailed_results:
@@ -120,29 +156,23 @@ def main():
                 count = len(detailed_results)
                 avg_f1 = total_f1 / count
                 avg_em = total_em / count
-            
+
             print(f"  Average F1 Score: {avg_f1:.4f}")
             print(f"  Average Exact Match Score: {avg_em:.4f}")
 
-            print_examples = False
-            if cheating_examples and print_examples:
-                print(f"\nThe LM cheated {len(cheating_examples)}/{len(cheating_examples) + len(predictions)} many times.")
-                print(f"{min(10, len(cheating_examples))} examples of cheating:")
-                for i, ex in enumerate(cheating_examples[:10]):
-                    raw_out = ex.get("raw_output", "")
-                    clean_out = raw_out.replace(start_span_token, "").replace(end_span_token, "")
-                    print(f"--- Example {i+1} ---")
-                    print(f"ID: {ex.get('id')}")
-                    print(f"Context (len={len(ex.get('context', ''))}): \033[91m{ex.get('context')}\033[0m...")
-                    print(f"Generated (len={len(raw_out)}): \033[91m{raw_out}\033[0m...")
-                    print(f"Cleaned (len={len(clean_out)}): \033[91m{clean_out}\033[0m...")
+        return current_results_by_method
 
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"\nAn error occurred while processing {filename}: {e}. Skipping.")
-        except Exception as e:
-            print(f"\nAn unexpected error occurred with {filename}: {e}")
 
-    # Comparison logic
+    # 3. Run evaluation on ALL IDs (Incorrect Analysis)
+    run_evaluation_on_ids(all_ids, "ALL IDs (Including Cheating)")
+
+    # 4. Run evaluation on valid IDs (Primary)
+    results_by_method_valid = run_evaluation_on_ids(valid_ids, "Valid (Non-Cheating) IDs from Standard")
+
+    # Comparison logic (using valid IDs results)
+    results_by_method = results_by_method_valid
+
+    print("Printing some examples of differences only on non-cheating examples.")
     if "standard" in results_by_method and "parallel_multiple_diff" in results_by_method:
         standard_results = results_by_method["standard"]
         parallel_results = results_by_method["parallel_multiple_diff"]
@@ -155,7 +185,7 @@ def main():
             standard_f1 = standard_results[key]["f1"]
             parallel_f1 = parallel_results[key]["f1"]
             diff = abs(standard_f1 - parallel_f1)
-            
+
             if diff > 0:
                 question, context = key
                 ground_truths = ground_truths_map.get(key, [])
@@ -174,7 +204,7 @@ def main():
 
         print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple_diff) ---")
         for i, item in enumerate(differences[:30]):
-            print(f"\n--- Example {i+1} (Diff: {item['diff']:.4f}) ---")
+            print(f"\n--- Example {i + 1} (Diff: {item['diff']:.4f}) ---")
             print(f"Question: {item['question']}")
             print(f"Context: {item['context']}")
             print(f"Ground Truth: {item['ground_truths']}")
