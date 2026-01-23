@@ -5,11 +5,11 @@ from utils.plotting_logits import plot_series
 import random
 
 class LLMRunner:
-    def __init__(self, model_name, device=None, max_new_tokens=1024, do_sample=False):
+    def __init__(self, model_name, device=None, max_new_tokens=512, do_sample=False):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         )
 
         self.model.eval()
@@ -55,7 +55,7 @@ class LLMRunner:
         # Generate output
         generated = self.model.generate(
             **inputs,
-            max_new_tokens=1,
+            max_new_tokens=self.max_new_tokens,
             do_sample=False,
             temperature=1.0,
             top_k=0,
@@ -69,23 +69,29 @@ class LLMRunner:
         )
 
         logits = torch.stack(generated.scores, dim=1)
-        first_logits = generated.scores[0][0]
-        all_logits = self.model(**inputs).logits[0, -1, :]
 
-        print( torch.allclose(
+        # first_logits = generated.scores[0][0]
+        # all_logits = self.model(**inputs).logits[0, -1, :]
+        # self.print_first_logits(all_logits, first_logits)
+
+        # Decode to string
+        return logits, self.decode_generated(inputs, generated.sequences)
+
+    def print_first_logits(self, all_logits, first_logits):
+        print(torch.allclose(
             first_logits,
-            all_logits.float(),
+            all_logits,
             atol=1e-3
         ))
 
-        print( torch.allclose(
+        print(torch.allclose(
             first_logits,
-            all_logits.float(),
-            atol=1e-2
+            all_logits,
+            atol=1e-5
         ))
 
         a = first_logits
-        b = all_logits.float()
+        b = all_logits
 
         mask = ~torch.isclose(a, b, atol=1e-6)
 
@@ -101,9 +107,6 @@ class LLMRunner:
                 b[i].item(),
                 (a[i] - b[i]).item()
             )
-
-        # Decode to string
-        return logits, self.decode_generated(inputs, generated.sequences)
 
     def tokenize_run_custom(self, prompt: str, targets_text=None, special=None, teacher_forcing=False):
         """
@@ -169,7 +172,7 @@ class LLMRunner:
             [
                 (selected_logits[:max_tokens], "At once"),
                 (special_logits_list[:max_tokens], "one by one"),
-                (outputs.logits[0, -len(targets[0])-1:, special_id].tolist()[:max_tokens], "one by one at the end"),
+                (outputs.logits[0, -len(targets[0]) - 1:, special_id].tolist()[:max_tokens], "one by one at the end"),
             ]
         )
 
@@ -184,9 +187,11 @@ class LLMRunner:
         # tokenize template and context independently
         tmpl_enc = self.tokenizer(
             template,
-            add_special_tokens=False,
             return_tensors="pt"
         )
+
+        if context[0] != " ":
+            context = " " + context
 
         ctx_enc = self.tokenizer(
             context,
@@ -206,7 +211,7 @@ class LLMRunner:
             # attention_mask=attention_mask
         )
 
-        return outputs['logits'][:, -context_len-1:]
+        return outputs['logits'][:, -context_len - 1:]
 
     def encode_ctx_diff(self, template, context) -> str:
         # tokenize template and context independently
@@ -231,7 +236,7 @@ class LLMRunner:
             [tmpl_enc["input_ids"], ctx_enc["input_ids"]],
             dim=1
         ).to(self.device)
-        outputs = self.model(input_ids=input_ids)
+        outputs = self.encode_ctx(template, context)
 
         # add eos and shift to right by one
         # Context has size X
@@ -241,7 +246,7 @@ class LLMRunner:
         GT_ids = self.append_eos_token_id(context_ids)
 
         # output_logits has size X+1, cuz we add logit from ctx_len-1 token
-        output_logits = outputs['logits'][:, -context_len-1:]
+        output_logits = outputs['logits'][:, -context_len - 1:]
 
         # Unsqueeze to match size of output_logits
         gt_logits = output_logits.gather(dim=-1, index=GT_ids.unsqueeze(-1))
@@ -249,7 +254,6 @@ class LLMRunner:
         predicted_ids = torch.argmax(output_logits, dim=-1)
 
         return output_logits - gt_logits, predicted_ids
-
 
     def append_eos_token_id(self, tokens):
         eos_id = self.tokenizer.eos_token_id
@@ -267,7 +271,6 @@ class LLMRunner:
             add_special_tokens=False,
             return_tensors="pt"
         )
-
 
         # Get token ids (1D tensor)
         token_ids = ctx["input_ids"][0]

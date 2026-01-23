@@ -1,6 +1,7 @@
 import functools
 import argparse
 import os.path
+import time
 import uuid
 
 import torch
@@ -104,7 +105,7 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
     first_greater = torch.argmax(in_generating.type(torch.int), dim=-1).item()
 
 
-    show_it = True
+    show_it = False
     if show_it:
         mask = torch.zeros(logits.size(-1)).type(torch.bool)
         mask.scatter_(dim=-1, index=torch.tensor(insert_token_ids), value=1)
@@ -159,9 +160,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
     tokens_finder = TokenByteFinder(model.tokenizer)
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_token)
 
-    for record in tqdm.tqdm(data):
-        if record['question'] != 'What is strongly linked to good student-teacher relationships?':
-            continue
+    for record in tqdm.tqdm(data, desc="Standard generation"):
 
         prompt = create_prompt(
             template,
@@ -175,12 +174,12 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
         answer = extract_span(start_span_token, end_span_token, generated)
 
 
-        print_topk_logits_decoded(
-            tokens_finder,
-            model.tokenizer,
-            logits,
-            start_span_tokens_id=start_span_tokens_id
-        )
+        # print_topk_logits_decoded(
+        #     tokens_finder,
+        #     model.tokenizer,
+        #     logits,
+        #     start_span_tokens_id=start_span_tokens_id
+        # )
 
         results.append(
             {
@@ -194,7 +193,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
 
 def generate_standard_answers_custom_decode(model, data, start_span_token, end_span_token, template):
     results = []
-    for record in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data, desc="Custom decode generation"):
         prompt = create_prompt(
             template,
             start_span_token=start_span_token,
@@ -250,7 +249,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
 
     data = remove_special_tokens(data, end_span_str, start_span_str)
 
-    for record in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data, desc="Parallel generation"):
         context = record['context']
         question = record['question']
 
@@ -267,11 +266,15 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
         start_context, end_context = model.split_context_by_token_pos(context, start)
         start_context = start_context + start_span_str
 
-        prompt_ctx = prompt + start_context
-        logits = model.encode_ctx(prompt_ctx, end_context)
-        end = find_max_pos(logits, end_span_tokens_id)
-        end_start, end_end = model.split_context_by_token_pos(end_context, end)
-        annotated = start_context + end_start + end_span_str + end_end
+        if end_context == "":
+            annotated = start_context + start_span_str + end_span_str
+            pass
+        else:
+            prompt_ctx = prompt + start_context
+            logits = model.encode_ctx(prompt_ctx, end_context)
+            end = find_max_pos(logits, end_span_tokens_id)
+            end_start, end_end = model.split_context_by_token_pos(end_context, end)
+            annotated = start_context + end_start + end_span_str + end_end
 
         answer = extract_span(start_span_str, end_span_str, annotated)
         results.append(
@@ -308,7 +311,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
     data = remove_special_tokens(data, end_span_str, start_span_str)
 
     results = []
-    for record in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data, desc="Parallel diff generation"):
         context = record['context']
         question = record['question']
         gt_span = get_token_span(model.tokenizer, context, find_span(context, record['answer'][0]))
@@ -325,15 +328,16 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", gt_range=gt_span)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
+        # print_topk_logits_decoded(
+        #     tokens_finder,
+        #     model.tokenizer,
+        #     logits,
+        #     start_span_tokens_id=start_span_tokens_id,
+        # )
+
         prompt_ctx = prompt + start_context + start_span_str
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
-            print_topk_logits_decoded(
-                tokens_finder,
-                model.tokenizer,
-                logits,
-                start_span_tokens_id=start_span_tokens_id,
-            )
             pass
         else:
             logits = model.encode_ctx(prompt_ctx, end_context)
@@ -355,7 +359,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
 
 def remove_special_tokens(data, end_span_token, start_span_token):
     data_removed_special = []
-    for record in tqdm.tqdm(data):
+    for record in tqdm.tqdm(data, desc="Preprocessing data"):
         data_removed_special.append(
             {
                 "question": remove_special_token(record["question"], start_span_token, end_span_token),
@@ -374,7 +378,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="LLM extractive QA processing.")
 
     parser.add_argument("--min_ans_size", type=int, default=5, help="Minimum answer word count.")
-    parser.add_argument("--max_dataset_size", type=int, default=300, help="Maximum dataset size to process.")
+    parser.add_argument("--max_dataset_size", type=int, default=None,
+                        help="Maximum dataset size to process.")
 
     parser.add_argument("--model", type=str, default="google/gemma-7b-it", help="HF model id to use.")
     parser.add_argument("--start_span_token", type=str, default="⟦", help="Start span token.")
@@ -395,11 +400,26 @@ def parse_args():
 def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
     """Runs a generation function and saves the results to a JSON file."""
     print(f"Running '{method_name}' method...")
+
+    start_time = time.time()
     results = generation_func(**kwargs)
-    results = sorted(results, key=lambda r: r["id"])
+    elapsed_time = time.time() - start_time
+
+    output_data = {
+        "parameters": {
+            "start_span_token": kwargs.get("start_span_token"),
+            "end_span_token": kwargs.get("end_span_token"),
+        },
+        "results": sorted(results, key=lambda r: r["id"]),
+        "generation_stats": {
+            "generation_time_sec": elapsed_time
+        }
+    }
+
     output_path = os.path.join(output_dir, f"{method_name}.json")
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=4)
+        json.dump(output_data, f, ensure_ascii=False, indent=4)
+
     print(f"Saved {method_name} method results to {output_path}")
 
 
@@ -440,7 +460,7 @@ def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
         gt_data.sort(key=lambda x: x['id'])  # Sort by ID for consistent order
         with open(gt_path, "w", encoding="utf-8") as f:
             json.dump(gt_data, f, ensure_ascii=False, indent=4)
-        print(f"Saved new ground truth data with IDs to {gt_path}")
+        print(f"Saved new ground truth data ({len(gt_data)} samples) with IDs to {gt_path}")
     else:
         print(f"Ground truth file '{gt_path}' with IDs already exists. Loading it.")
         print("Ignoring dataset creation arguments (--min_ans_size, --max_dataset_size).")
@@ -454,6 +474,8 @@ def load_or_create_gt_data(output_dir, min_ans_size, max_dataset_size):
 
 def main():
     args = parse_args()
+
+    args.extracted_data_path = os.path.join(args.extracted_data_path, args.model.strip("/").split("/")[-1])
 
     template = read_template(args.template_path)
     model = LLMRunner(args.model)
@@ -479,7 +501,9 @@ def main():
         "end_span_token": args.end_span_token,
     }
 
-    methods_to_run = generation_methods.keys() if args.method == 'all' else [args.method]
+    methods_to_run = list(generation_methods.keys()) if args.method == 'all' else [args.method]
+    if 'standard_custom_decode' in methods_to_run:
+        methods_to_run.remove('standard_custom_decode')  # Broken by now
 
     for method_name in methods_to_run:
         assert method_name in generation_methods, f"'{method_name}' method is not implemented."
