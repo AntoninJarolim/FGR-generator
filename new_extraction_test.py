@@ -125,7 +125,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
             context=record["context"]
         )
 
-        logits, generated = model.tokenize_run(prompt)
+        logits, generated, generated_ids = model.tokenize_run(prompt)
         answer = extract_span(start_span_token, end_span_token, generated)
 
         # print_topk_logits_decoded(
@@ -140,6 +140,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
                 **record,
                 "prediction": answer,
                 "raw_output": generated,
+                "generated_ids": generated_ids,
             }
         )
     return results
@@ -173,7 +174,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
             context=context
         )
 
-        logits = model.encode_ctx(prompt, context)
+        logits, ctx_enc = model.encode_ctx(prompt, context)
         start = find_max_pos(logits, start_span_tokens_id)
         start_context, end_context = model.split_context_by_token_pos(context, start)
         start_context = start_context + start_span_str
@@ -183,7 +184,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
             pass
         else:
             prompt_ctx = prompt + start_context
-            logits = model.encode_ctx(prompt_ctx, end_context)
+            logits, _ = model.encode_ctx(prompt_ctx, end_context)
             end = find_max_pos(logits, end_span_tokens_id)
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
             annotated = start_context + end_start + end_span_str + end_end
@@ -194,6 +195,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
                 **record,
                 "prediction": answer,
                 "raw_output": annotated,
+                "ctx_enc": ctx_enc
             }
         )
     return results
@@ -223,7 +225,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             context=context
         )
 
-        logits = model.encode_ctx(prompt, context)
+        logits, ctx_enc = model.encode_ctx(prompt, context)
         start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", gt_range=gt_span_pos)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
@@ -239,7 +241,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             annotated = start_context + start_span_str + end_span_str
             pass
         else:
-            logits = model.encode_ctx(prompt_ctx, end_context)
+            logits, _ = model.encode_ctx(prompt_ctx, end_context)
             end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end", gt_range=gt_span_pos,
                                             start_index=start)
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
@@ -252,6 +254,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
                 **record,
                 "prediction": answer,
                 "raw_output": annotated,
+                "ctx_enc": ctx_enc
             }
         )
     return results

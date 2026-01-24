@@ -108,7 +108,10 @@ class LLMRunner:
         # self.print_first_logits(all_logits, first_logits)
 
         # Decode to string
-        return logits, self.decode_generated(inputs, generated.sequences)
+        input_size = len(inputs['input_ids'][0])
+        generated_ids = generated.sequences[0][input_size:].tolist()
+        decoded_seq = self.decode_generated(inputs, generated.sequences)
+        return logits, decoded_seq, generated_ids
 
     def decode_generated(self, inputs, generated):
         input_size = len(inputs['input_ids'][0])
@@ -143,7 +146,7 @@ class LLMRunner:
             # attention_mask=attention_mask
         )
 
-        return outputs['logits'][:, -context_len - 1:]
+        return outputs['logits'][:, -context_len - 1:], ctx_enc
 
     def append_eos_token_id(self, tokens):
         eos_id = self.tokenizer.eos_token_id
