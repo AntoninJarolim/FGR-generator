@@ -146,7 +146,7 @@ class LLMRunner:
             # attention_mask=attention_mask
         )
 
-        return outputs['logits'][:, -context_len - 1:], ctx_enc
+        return outputs['logits'][:, -context_len - 1:], ctx_enc["input_ids"].tolist()[0]
 
     def append_eos_token_id(self, tokens):
         eos_id = self.tokenizer.eos_token_id
