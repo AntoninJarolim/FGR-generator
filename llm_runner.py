@@ -1,7 +1,6 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
-from utils.plotting_logits import plot_series
 import random
 
 
@@ -110,76 +109,6 @@ class LLMRunner:
 
         # Decode to string
         return logits, self.decode_generated(inputs, generated.sequences)
-
-    def tokenize_run_custom(self, prompt: str, targets_text=None, special=None, teacher_forcing=False):
-        """
-        Tokenizes the prompt, runs the model autoregressively, and returns decoded text.
-        But without using model.generate
-        """
-        # Encode the input
-        inputs = self.tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(self.device)
-        targets = self.tokenizer(targets_text,
-                                 return_tensors="pt",
-                                 add_special_tokens=False,
-                                 ).to(self.device)["input_ids"]
-
-        special_id = self.tokenize_char(special)
-
-        input_ids = inputs["input_ids"]
-        generated = input_ids
-
-        nr_new_tokens = len(targets[0]) if teacher_forcing else self.max_new_tokens
-
-        special_logits_list = []
-        for new_pos in range(nr_new_tokens + 1):
-            with torch.no_grad():
-                outputs = self.model(
-                    input_ids=generated,  # [:, -1:] if past_key_values is not None else generated,
-                    # attention_mask=attention_mask,
-                    # past_key_values=past_key_values,
-                    # use_cache=False,
-                )
-
-            # To not break following indexing
-            if new_pos == nr_new_tokens:
-                break
-
-            # (batch, sq_len, vocab)
-            next_token = (
-                targets[:, new_pos]
-                if teacher_forcing else
-                torch.argmax(outputs.logits, dim=-1)[:, -1]
-            )
-
-            if next_token.item() == special_id.item():
-                pass
-            else:
-                special_id_logit = outputs.logits[:, -1, special_id]
-                special_logits_list.append(special_id_logit.item())
-
-            generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=-1)
-
-            # optional stopping on EOS
-            if self.tokenizer.eos_token_id is not None:
-                if (next_token == self.tokenizer.eos_token_id).all():
-                    special_logits_list.pop()
-                    break
-
-        # todo: encode with one self.model() call
-        all_logits = self.encode_ctx(prompt, targets_text)
-        selected_logits = all_logits[0, :, special_id].tolist()
-        # Log the logits for a special token
-
-        max_tokens = 50
-        plot_series(
-            [
-                (selected_logits[:max_tokens], "At once"),
-                (special_logits_list[:max_tokens], "one by one"),
-                (outputs.logits[0, -len(targets[0]) - 1:, special_id].tolist()[:max_tokens], "one by one at the end"),
-            ]
-        )
-
-        return self.decode_generated(inputs, generated)
 
     def decode_generated(self, inputs, generated):
         input_size = len(inputs['input_ids'][0])

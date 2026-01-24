@@ -81,11 +81,6 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
     return first_greater
 
 
-# -----------------------------
-# Loop functions
-# -----------------------------
-
-
 def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_at):
     values = selected_logits[0].cpu()
     import matplotlib.pyplot as plt
@@ -108,6 +103,11 @@ def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_a
     plt.grid(True)
     plt.legend()
     plt.show()
+
+
+# -----------------------------
+# Loop functions
+# -----------------------------
 
 
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
@@ -134,38 +134,6 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
         #     logits,
         #     start_span_tokens_id=start_span_tokens_id
         # )
-
-        results.append(
-            {
-                **record,
-                "prediction": answer,
-                "raw_output": generated,
-            }
-        )
-    return results
-
-
-# -----------------------------
-# Main function
-# -----------------------------
-
-def generate_standard_answers_custom_decode(model, data, start_span_token, end_span_token, template):
-    results = []
-    for record in tqdm.tqdm(data, desc="Custom decode generation"):
-        prompt = create_prompt(
-            template,
-            start_span_token=start_span_token,
-            end_span_token=end_span_token,
-            question=record["question"],
-            context=record["context"]
-        )
-
-        generated = model.tokenize_run_custom(
-            prompt,
-            targets_text=record['context'],
-            special=start_span_token,
-        )
-        answer = extract_span(start_span_token, end_span_token, generated)
 
         results.append(
             {
@@ -368,7 +336,6 @@ def main():
 
     generation_methods = {
         "standard": functools.partial(generate_standard_answers),
-        "standard_custom_decode": functools.partial(generate_standard_answers_custom_decode),
         "parallel": functools.partial(generate_parallel_answers, one_char=True),
         "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
         "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
@@ -381,11 +348,8 @@ def main():
         "end_span_token": args.end_span_token,
     }
 
-    methods_to_run = list(generation_methods.keys()) if args.method == 'all' else [args.method]
-    if 'standard_custom_decode' in methods_to_run:
-        methods_to_run.remove('standard_custom_decode')  # Broken by now
 
-    for method_name in methods_to_run:
+    for method_name in generation_methods:
         assert method_name in generation_methods, f"'{method_name}' method is not implemented."
 
         run_and_save_results(
