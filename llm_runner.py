@@ -4,6 +4,39 @@ import numpy as np
 from utils.plotting_logits import plot_series
 import random
 
+
+def print_first_logits(all_logits, first_logits):
+    print(torch.allclose(
+        first_logits,
+        all_logits,
+        atol=1e-3
+    ))
+
+    print(torch.allclose(
+        first_logits,
+        all_logits,
+        atol=1e-5
+    ))
+
+    a = first_logits
+    b = all_logits
+
+    mask = ~torch.isclose(a, b, atol=1e-6)
+
+    idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
+
+    print("num differing:", idx.numel())
+    print("first 10 indices:", idx[:10])
+
+    for i in idx[:10]:
+        print(
+            i.item(),
+            a[i].item(),
+            b[i].item(),
+            (a[i] - b[i]).item()
+        )
+
+
 class LLMRunner:
     def __init__(self, model_name, device=None, max_new_tokens=512, do_sample=False):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -34,8 +67,6 @@ class LLMRunner:
         random.seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-
-
 
     def tokenize_char(self, character):
         assert len(character) == 1
@@ -77,37 +108,6 @@ class LLMRunner:
         # Decode to string
         return logits, self.decode_generated(inputs, generated.sequences)
 
-    def print_first_logits(self, all_logits, first_logits):
-        print(torch.allclose(
-            first_logits,
-            all_logits,
-            atol=1e-3
-        ))
-
-        print(torch.allclose(
-            first_logits,
-            all_logits,
-            atol=1e-5
-        ))
-
-        a = first_logits
-        b = all_logits
-
-        mask = ~torch.isclose(a, b, atol=1e-6)
-
-        idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
-
-        print("num differing:", idx.numel())
-        print("first 10 indices:", idx[:10])
-
-        for i in idx[:10]:
-            print(
-                i.item(),
-                a[i].item(),
-                b[i].item(),
-                (a[i] - b[i]).item()
-            )
-
     def tokenize_run_custom(self, prompt: str, targets_text=None, special=None, teacher_forcing=False):
         """
         Tokenizes the prompt, runs the model autoregressively, and returns decoded text.
@@ -131,7 +131,7 @@ class LLMRunner:
         for new_pos in range(nr_new_tokens + 1):
             with torch.no_grad():
                 outputs = self.model(
-                    input_ids=generated, # [:, -1:] if past_key_values is not None else generated,
+                    input_ids=generated,  # [:, -1:] if past_key_values is not None else generated,
                     # attention_mask=attention_mask,
                     # past_key_values=past_key_values,
                     # use_cache=False,
