@@ -181,6 +181,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
 
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
+            end = None
             pass
         else:
             prompt_ctx = prompt + start_context
@@ -195,7 +196,9 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
                 **record,
                 "prediction": answer,
                 "raw_output": annotated,
-                "ctx_enc": ctx_enc
+                "ctx_enc": ctx_enc,
+                "start": start,
+                "end": end
             }
         )
     return results
@@ -239,6 +242,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         prompt_ctx = prompt + start_context + start_span_str
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
+            end = None
             pass
         else:
             logits, _ = model.encode_ctx(prompt_ctx, end_context)
@@ -254,7 +258,9 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
                 **record,
                 "prediction": answer,
                 "raw_output": annotated,
-                "ctx_enc": ctx_enc
+                "ctx_enc": ctx_enc,
+                "start": start,
+                "end": end,
             }
         )
     return results
