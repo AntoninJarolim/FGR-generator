@@ -397,12 +397,25 @@ def parse_args():
     return parser.parse_args()
 
 
+def safe_run_generation(method_name, generation_func, **kwargs):
+    results = []
+    error_message = None
+    try:
+        results = generation_func(**kwargs)
+    except Exception as e:
+        print(f"Error running '{method_name}': {e}")
+        error_message = str(e)
+        import traceback
+        traceback.print_exc()
+    return results, error_message
+
+
 def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
     """Runs a generation function and saves the results to a JSON file."""
     print(f"Running '{method_name}' method...")
 
     start_time = time.time()
-    results = generation_func(**kwargs)
+    results, error_message = safe_run_generation(method_name, generation_func, **kwargs)
     elapsed_time = time.time() - start_time
 
     output_data = {
@@ -410,10 +423,11 @@ def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
             "start_span_token": kwargs.get("start_span_token"),
             "end_span_token": kwargs.get("end_span_token"),
         },
-        "results": sorted(results, key=lambda r: r["id"]),
+        "results": sorted(results, key=lambda r: r["id"]) if results else [],
         "generation_stats": {
             "generation_time_sec": elapsed_time
-        }
+        },
+        "error_message": error_message
     }
 
     output_path = os.path.join(output_dir, f"{method_name}.json")
