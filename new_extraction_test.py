@@ -11,6 +11,7 @@ from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
 from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span
 from utils.squad_dataset import load_or_create_gt_data
+from utils.other import TimedList
 
 
 def create_prompt(template, **kwargs):
@@ -110,7 +111,7 @@ def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_a
 
 
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
-    results = []
+    results = TimedList()
 
     tokens_finder = TokenByteFinder(model.tokenizer)
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_token)
@@ -180,7 +181,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
     start_span_str = start_span_token
     end_span_str = end_span_token
 
-    results = []
+    results = TimedList()
 
     if one_char:
         start_span_tokens_id = model.tokenize_char(start_span_str)
@@ -240,7 +241,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
 
     data = remove_special_tokens(data, end_span_str, start_span_str)
 
-    results = []
+    results = TimedList()
     for record in tqdm.tqdm(data, desc="Parallel diff generation"):
         context = record['context']
         question = record['question']
