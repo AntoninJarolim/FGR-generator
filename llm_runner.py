@@ -54,6 +54,9 @@ class LLMRunner:
         self.max_new_tokens = max_new_tokens
         self.do_sample = do_sample
 
+        self._setup_model_config()
+
+    def _setup_model_config(self):
         # Disable processing logits in any wa
         self.model.generation_config.top_k = 0
         self.model.generation_config.top_p = 1.0
