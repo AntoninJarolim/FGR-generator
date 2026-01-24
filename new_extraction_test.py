@@ -2,31 +2,15 @@ import functools
 import argparse
 import os.path
 import time
-
 import torch
 import json
-
 import tqdm
 from jinja2 import Template
-
 from torch import newaxis
-
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner
-from utils.logits_examine import print_topk_logits_decoded
-from utils.text_utils import find_span
+from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span
 from utils.squad_dataset import load_or_create_gt_data
-
-
-def remove_special_token(text, *args, error_on_detection=False):
-    for special_token in args:
-        if special_token in text:
-            if error_on_detection:
-                raise AssertionError(f"Special token '{special_token}' cannot in text \n{text}")
-
-            print(f"Warning: Removing special token '{special_token}' from text present in: \n{text}")
-            text = text.replace(special_token, "")
-    return text
 
 
 def create_prompt(template, **kwargs):
@@ -44,13 +28,21 @@ def create_prompt(template, **kwargs):
     return template.render(**kwargs)
 
 
-def extract_span(start_str, end_str, generated_text):
-    """Extract text between start and end tokens."""
-    start_idx = generated_text.find(start_str)
-    end_idx = generated_text.find(end_str, start_idx + 1)
-    if start_idx != -1 and end_idx != -1:
-        return generated_text[start_idx + len(start_str):end_idx]
-    return ""
+def remove_special_tokens(data, end_span_token, start_span_token):
+    data_removed_special = []
+    for record in tqdm.tqdm(data, desc="Preprocessing data"):
+        data_removed_special.append(
+            {
+                "question": remove_special_token(record["question"], start_span_token, end_span_token),
+                "answer": [
+                    remove_special_token(a, start_span_token, end_span_token)
+                    for a in record["answer"]
+                ],
+                "context": remove_special_token(record["context"], start_span_token, end_span_token),
+                "id": record["id"]
+            }
+        )
+    return data_removed_special
 
 
 def find_max_pos(logits, insert_token_ids):
@@ -63,6 +55,7 @@ def find_max_pos(logits, insert_token_ids):
     pos = torch.argmax(selected_logits, dim=-1).item()
     return pos
 
+
 def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_range=None, start_index=0):
     # logits is Batch, Time, Vocab
 
@@ -71,7 +64,6 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
     insert_tag_ids = torch.tensor(insert_token_ids)[newaxis, newaxis, :]
     in_generating = torch.eq(greedy_next, insert_tag_ids).any(dim=-1)
     first_greater = torch.argmax(in_generating.type(torch.int), dim=-1).item()
-
 
     show_it = False
     if show_it:
@@ -86,6 +78,12 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
         plot_logits_at_positions(plot_label, first_greater, logits_, gt_range, start_at=start_index)
 
     return first_greater
+
+
+# -----------------------------
+# Loop functions
+# -----------------------------
+
 
 def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_at):
     values = selected_logits[0].cpu()
@@ -111,11 +109,6 @@ def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_a
     plt.show()
 
 
-# -----------------------------
-# Loop functions
-# -----------------------------
-
-
 def generate_standard_answers(model, data, start_span_token, end_span_token, template):
     results = []
 
@@ -123,7 +116,6 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_token)
 
     for record in tqdm.tqdm(data, desc="Standard generation"):
-
         prompt = create_prompt(
             template,
             start_span_token=start_span_token,
@@ -134,7 +126,6 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
 
         logits, generated = model.tokenize_run(prompt)
         answer = extract_span(start_span_token, end_span_token, generated)
-
 
         # print_topk_logits_decoded(
         #     tokens_finder,
@@ -152,6 +143,10 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
         )
     return results
 
+
+# -----------------------------
+# Main function
+# -----------------------------
 
 def generate_standard_answers_custom_decode(model, data, start_span_token, end_span_token, template):
     results = []
@@ -180,20 +175,6 @@ def generate_standard_answers_custom_decode(model, data, start_span_token, end_s
         )
     return results
 
-
-def read_template(path):
-    with open(path, 'r') as f:
-        template_text = f.read()
-        # if template_text[-1] != " ":
-        #     template_text += " "
-    template = Template(template_text)
-    template.template_text = template_text
-    return template
-
-
-# -----------------------------
-# Main function
-# -----------------------------
 
 def generate_parallel_answers(model, data, template, start_span_token, end_span_token, one_char=True):
     start_span_str = start_span_token
@@ -249,19 +230,6 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
     return results
 
 
-def get_token_span(tokenizer, text, char_span):
-    char_start, char_end = char_span
-    encodings = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
-
-    token_start = encodings.char_to_token(char_start)
-    token_end = encodings.char_to_token(char_end)
-
-    assert token_end is not None
-    assert token_start is not None
-
-    return token_start, token_end
-
-
 def generate_parallel_answers_diff(model, data, template, start_span_token, end_span_token):
     start_span_str = start_span_token
     end_span_str = end_span_token
@@ -276,7 +244,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
     for record in tqdm.tqdm(data, desc="Parallel diff generation"):
         context = record['context']
         question = record['question']
-        gt_span = get_token_span(model.tokenizer, context, find_span(context, record['answer'][0]))
+        gt_span_pos = get_token_span(model.tokenizer, context, find_span(context, record['answer'][0]))
 
         prompt = create_prompt(
             template,
@@ -287,7 +255,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         )
 
         logits = model.encode_ctx(prompt, context)
-        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", gt_range=gt_span)
+        start = lowest_index_greater_zero(logits, start_span_tokens_id, plot_label="Start", gt_range=gt_span_pos)
         start_context, end_context = model.split_context_by_token_pos(context, start)
 
         # print_topk_logits_decoded(
@@ -303,7 +271,8 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             pass
         else:
             logits = model.encode_ctx(prompt_ctx, end_context)
-            end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end", gt_range=gt_span, start_index=start)
+            end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end", gt_range=gt_span_pos,
+                                            start_index=start)
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
             annotated = start_context + start_span_str + end_start + end_span_str + end_end
 
@@ -317,23 +286,6 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             }
         )
     return results
-
-
-def remove_special_tokens(data, end_span_token, start_span_token):
-    data_removed_special = []
-    for record in tqdm.tqdm(data, desc="Preprocessing data"):
-        data_removed_special.append(
-            {
-                "question": remove_special_token(record["question"], start_span_token, end_span_token),
-                "answer": [
-                    remove_special_token(a, start_span_token, end_span_token)
-                    for a in record["answer"]
-                ],
-                "context": remove_special_token(record["context"], start_span_token, end_span_token),
-                "id": record["id"]
-            }
-        )
-    return data_removed_special
 
 
 def parse_args():

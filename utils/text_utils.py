@@ -1,3 +1,6 @@
+from jinja2 import Template
+
+
 def tokenize_list(tokens, tokenizer):
     token_list = []
     for t in tokens.tolist():
@@ -72,3 +75,43 @@ def find_span(context: str, span: str) -> tuple[int, int]:
     end = start + len(span) - 1
     return start, end
 
+
+def extract_span(start_str, end_str, generated_text):
+    """Extract text between start and end tokens."""
+    start_idx = generated_text.find(start_str)
+    end_idx = generated_text.find(end_str, start_idx + 1)
+    if start_idx != -1 and end_idx != -1:
+        return generated_text[start_idx + len(start_str):end_idx]
+    return ""
+
+
+def remove_special_token(text, *args, error_on_detection=False):
+    for special_token in args:
+        if special_token in text:
+            if error_on_detection:
+                raise AssertionError(f"Special token '{special_token}' cannot in text \n{text}")
+
+            print(f"Warning: Removing special token '{special_token}' from text present in: \n{text}")
+            text = text.replace(special_token, "")
+    return text
+
+
+def read_template(path):
+    with open(path, 'r') as f:
+        template_text = f.read()
+    template = Template(template_text)
+    template.template_text = template_text
+    return template
+
+
+def get_token_span(tokenizer, text, char_span):
+    char_start, char_end = char_span
+    encodings = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+
+    token_start = encodings.char_to_token(char_start)
+    token_end = encodings.char_to_token(char_end)
+
+    assert token_end is not None
+    assert token_start is not None
+
+    return token_start, token_end
