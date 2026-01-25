@@ -1,7 +1,8 @@
 import json
 import argparse
 import os
-from typing import Any
+from argparse import Namespace
+from typing import Any, Literal
 
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
 
@@ -50,71 +51,122 @@ def check_is_valid(record, start_token, end_token):
     return normalize_text(cleaned_output) == normalize_text(context)
 
 
-def check_score_diff_conditioned_on_tokenization(standard_results, parallel_results):
-    diff_scores_set = set()
-    for key in standard_results.keys():
+def get_valid_ids(ref_preds, reference_method: str, start_span_token, end_span_token) -> set[Any]:
+    # Check for validity in reference method
+    valid_ids = set()
+    for pred_id, pred_data in ref_preds.items():
+        if check_is_valid(pred_data, start_span_token, end_span_token):
+            valid_ids.add(pred_id)
 
-        st_obj = standard_results[key]
-        pl_obj = parallel_results[key]
+    cheating_count = len(ref_preds) - len(valid_ids)
+    print(f"Found {len(valid_ids)} valid IDs out of {len(ref_preds)} total in '{reference_method}'.")
+    if cheating_count > 0:
+        print(f"Excluded {cheating_count} cheating examples from comparison set.")
+    return valid_ids
 
-        if st_obj["f1"] != pl_obj["f1"]:
-            diff_scores_set.add(key)
+
+def get_diff_tokens_ids(standard_data, parallel_data, valid_ids):
+    standard_data = standard_data["results"]
+    parallel_data = parallel_data["results"]
+
+    diff_tokens_ids = set()
+    for key in valid_ids:
+        std_ctx = standard_data[key]['ctx_enc']
+        prl_ctx = parallel_data[key]['ctx_enc']
+
+        if std_ctx[-1] == 128009:  # todo: eos_token_id:
+            std_ctx = std_ctx[:-1]
+
+        if std_ctx != prl_ctx:
+            diff_tokens_ids.add(key)
+
+    return diff_tokens_ids
 
 
-    for key in diff_scores_set:
-        assert standard_results[key]["ctx_enc"] != parallel_results[key]["ctx_enc"]
+def get_diff_raw_outputs(standard_data, parallel_data, ids_to_inspect):
+    def white_space_fix(text):
+        return ' '.join(text.split())
 
-    print("For all different scores, the tokenization is different.")
+    standard_data = standard_data["results"]
+    parallel_data = parallel_data["results"]
 
+    diff_texts = set()
+    for k in ids_to_inspect:
+        std_ctx = standard_data[k]['raw_output']
+        prl_ctx = parallel_data[k]['raw_output']
+
+        if white_space_fix(std_ctx) != white_space_fix(prl_ctx):
+            diff_texts.add(k)
+
+    return diff_texts
+
+
+def get_diff_prediction_span(standard_data, parallel_data, ids_to_inspect):
+    standard_data = standard_data["results"]
+    parallel_data = parallel_data["results"]
+
+    diff_pred_ids = set()
+    for k in ids_to_inspect:
+        std_ctx = standard_data[k]['prediction']
+        prl_ctx = parallel_data[k]['prediction']
+
+        if not exact_match_score(std_ctx, prl_ctx):
+            diff_pred_ids.add(k)
+
+    return diff_pred_ids
+
+
+# Helper function to run evaluation on a specific set of IDs
+def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_map):
+    print(f"\n\n{'=' * 20} Running Evaluation: {label} {'=' * 20}")
+    print(f"Evaluating on {len(target_ids)} IDs.")
+
+    current_results_by_method = {}
+
+    for method_name, data in methods_data.items():
+        print(f"\nEvaluating '{method_name}'...")
+        predictions = data["results"]
+
+        # Filter predictions to only those in target_ids
+        filtered_preds = [p_data for p_id, p_data in predictions.items()
+                          if p_id in target_ids]
+
+        # Get detailed results
+        detailed_results = evaluate(filtered_preds, ground_truths_data_map)
+        current_results_by_method[method_name] = detailed_results
+
+        # Calculate and print averages
+        if not detailed_results:
+            avg_f1, avg_em = 0.0, 0.0
+        else:
+            total_f1 = sum(res['f1'] for res in detailed_results.values())
+            total_em = sum(res['em'] for res in detailed_results.values())
+            count = len(detailed_results)
+            avg_f1 = total_f1 / count
+            avg_em = total_em / count
+
+        print(f"  Average F1 Score: {avg_f1:.4f}")
+        print(f"  Average Exact Match Score: {avg_em:.4f}")
+
+    return current_results_by_method
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
-    parser.add_argument("input_dir", help="Path to the directory with prediction files.")
-    args = parser.parse_args()
+    args = parse_args()
 
-    # Load ground truth
-    gt_path = os.path.join(args.input_dir, "gt.json")
-    try:
-        with open(gt_path, 'r', encoding='utf-8') as f:
-            gt_data = json.load(f)
-    except FileNotFoundError:
-        print(f"Error: Ground truth file not found at {gt_path}")
-        return
-
+    # Load ground truth data with answers
+    gt_data = get_gt_data(args)
     ground_truths_data_map = {item["id"]: item for item in gt_data}
 
     # Find and evaluate all prediction files in the input directory
-    try:
-        prediction_files = [f for f in os.listdir(args.input_dir) if f.endswith('.json') and f != 'gt.json']
-    except FileNotFoundError:
-        print(f"Error: Input directory not found at {args.input_dir}")
-        return
-
-    if not prediction_files:
-        print("\nNo prediction files (ending in .json, excluding gt.json) found to evaluate.")
-        return
+    prediction_files = [f for f in os.listdir(args.input_dir) if f.endswith('.json') and f != 'gt.json']
+    assert prediction_files, "No prediction files found to evaluate."
 
     # 1. Load all method data
-    methods_data = {}
-    for filename in sorted(prediction_files):
-        method_name = os.path.splitext(filename)[0]
-        file_path = os.path.join(args.input_dir, filename)
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data_loaded = json.load(f)
-            methods_data[method_name] = data_loaded
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"\nAn error occurred while loading {filename}: {e}. Skipping.")
+    methods_data = load_all_data(args, prediction_files)
 
-    if not methods_data:
-        print("No valid method data loaded.")
-        return
-
-    # 2. Find valid IDs from 'standard' method
     assert "standard" in methods_data
     reference_method = "standard"
-
     print(f"Using '{reference_method}' as the reference for valid IDs.")
 
     ref_data = methods_data[reference_method]
@@ -123,61 +175,51 @@ def main():
     start_span_token = ref_params["start_span_token"]
     end_span_token = ref_params["end_span_token"]
 
-    assert all(
-        [
-            # start and end span tokens must match for valid comparison
-            data['parameters'] == methods_data[reference_method]['parameters']
-            for method_name, data in methods_data.items()
-         ]
-    )
+    assert_coherent_params(methods_data, reference_method)
 
-    all_ids = set(pred["id"] for pred in ref_preds)
+    # 2. Get the differences in the most prominent method and standard eval baseline
+    all_ids = set(ref_preds.keys())
 
+    # Filter examples with invalid generation using even standard method
     valid_ids = get_valid_ids(ref_preds, reference_method, start_span_token, end_span_token)
 
-    # Helper function to run evaluation on a specific set of IDs
-    def run_evaluation_on_ids(target_ids, label):
-        print(f"\n\n{'=' * 20} Running Evaluation: {label} {'=' * 20}")
-        print(f"Evaluating on {len(target_ids)} IDs.")
+    # Find differences of context tokenization
+    diff_tokens_ids = get_diff_tokens_ids(
+        methods_data[reference_method],
+        methods_data["parallel_multiple_diff"],
+        valid_ids
+    )
 
-        current_results_by_method = {}
+    diff_texts_ids = get_diff_raw_outputs(
+        methods_data[reference_method],
+        methods_data["parallel_multiple_diff"],
+        diff_tokens_ids
+    )
 
-        for method_name, data in methods_data.items():
-            print(f"\nEvaluating '{method_name}'...")
-            predictions = data["results"]
-
-            # Filter predictions to only those in target_ids
-            filtered_preds = [p for p in predictions if p["id"] in target_ids]
-
-            # Get detailed results
-            detailed_results = evaluate(filtered_preds, ground_truths_data_map)
-            current_results_by_method[method_name] = detailed_results
-
-            # Calculate and print averages
-            if not detailed_results:
-                avg_f1, avg_em = 0.0, 0.0
-            else:
-                total_f1 = sum(res['f1'] for res in detailed_results.values())
-                total_em = sum(res['em'] for res in detailed_results.values())
-                count = len(detailed_results)
-                avg_f1 = total_f1 / count
-                avg_em = total_em / count
-
-            print(f"  Average F1 Score: {avg_f1:.4f}")
-            print(f"  Average Exact Match Score: {avg_em:.4f}")
-
-        return current_results_by_method
-
+    diff_prediction_ids = get_diff_prediction_span(
+        methods_data[reference_method],
+        methods_data["parallel_multiple_diff"],
+        diff_tokens_ids
+    )
 
     # 3. Run evaluation on ALL IDs (Incorrect Analysis)
-    run_evaluation_on_ids(all_ids, "ALL IDs (Including Cheating)")
+    run_evaluation_on_ids(
+        all_ids,
+        "ALL IDs (Including Cheating)",
+        methods_data, ground_truths_data_map
+    )
 
     # 4. Run evaluation on valid IDs (Primary)
-    results_by_method_valid = run_evaluation_on_ids(valid_ids, "Valid (Non-Cheating) IDs from Standard")
+    results_by_method_valid = run_evaluation_on_ids(
+        valid_ids,
+        "Valid (Non-Cheating) IDs from Standard",
+        methods_data,
+        ground_truths_data_map
+    )
 
     # Comparison logic (using valid IDs results)
     results_by_method = results_by_method_valid
-    
+
     if not "standard" in results_by_method or not "parallel_multiple_diff" in results_by_method:
         print("\nSkipping comparison: 'standard' and/or 'parallel_multiple_diff' results not found.")
         exit(0)
@@ -185,9 +227,7 @@ def main():
     print("Printing some examples of differences only on non-cheating examples.")
     standard_results = results_by_method["standard"]
     parallel_results = results_by_method["parallel_multiple_diff"]
-    
-    check_score_diff_conditioned_on_tokenization(standard_results, parallel_results)
-    
+
     differences = []
     common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
     print(f"Length of Common  (standard and. parallel_multiple_diff): {len(common_keys)}")
@@ -225,18 +265,57 @@ def main():
         print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
 
 
-def get_valid_ids(ref_preds, reference_method: str, start_span_token, end_span_token) -> set[Any]:
-    # Check for validity in reference method
-    valid_ids = set()
-    for pred in ref_preds:
-        if check_is_valid(pred, start_span_token, end_span_token):
-            valid_ids.add(pred["id"])
+def parse_args() -> Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
+    parser.add_argument("input_dir", help="Path to the directory with prediction files.")
+    args = parser.parse_args()
+    return args
 
-    cheating_count = len(ref_preds) - len(valid_ids)
-    print(f"Found {len(valid_ids)} valid IDs out of {len(ref_preds)} total in '{reference_method}'.")
-    if cheating_count > 0:
-        print(f"Excluded {cheating_count} cheating examples from comparison set.")
-    return valid_ids
+
+def get_gt_data(args: Namespace) -> Any:
+    gt_path = os.path.join(args.input_dir, "gt.json")
+    with open(gt_path, 'r', encoding='utf-8') as f:
+        gt_data = json.load(f)
+    assert gt_data, f"Error: Ground truth file not found at {gt_path}"
+    return gt_data
+
+
+def assert_coherent_params(methods_data: dict[Any, Any], reference_method: str):
+    """
+    Check that all the methods were generated using the same generation params.
+    Invalid comparison would arise otherwise
+    """
+    assert all(
+        [
+            # start and end span tokens must match for valid comparison
+            data['parameters'] == methods_data[reference_method]['parameters']
+            for method_name, data in methods_data.items()
+        ]
+    )
+
+
+def load_all_data(args: Namespace, prediction_files: list[str | Literal['gt.json']]) -> dict[Any, Any]:
+    methods_data = {}
+    for filename in sorted(prediction_files):
+        method_name = os.path.splitext(filename)[0]
+        file_path = os.path.join(args.input_dir, filename)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data_loaded = json.load(f)
+            methods_data[method_name] = data_loaded
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"\nAn error occurred while loading {filename}: {e}. Skipping.")
+
+    if not methods_data:
+        print("No valid method data loaded.")
+        exit(1)
+
+    for method_name, data in methods_data.items():
+        results_list = data["results"]
+        # Convert list of results to the dict of results, to allow indexing by key
+        data['results'] = {r['id']: r for r in results_list}
+
+    return methods_data
 
 
 if __name__ == "__main__":
