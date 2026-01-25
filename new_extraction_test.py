@@ -364,7 +364,7 @@ def main():
     }
 
     for method_name in generation_methods:
-        if method_name != "all" and method_name != args.method:
+        if args.method != "all" and args.method != method_name:
             continue
         
         assert method_name in generation_methods, f"'{method_name}' method is not implemented."
