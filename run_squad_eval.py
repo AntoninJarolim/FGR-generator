@@ -1,6 +1,7 @@
 import json
 import argparse
 import os
+from typing import Any
 
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
 
@@ -130,23 +131,9 @@ def main():
          ]
     )
 
-    valid_ids = set()
-    all_ids = set()
+    all_ids = set(pred["id"] for pred in ref_preds)
 
-    # Check for validity in reference method
-    cheating_count = 0
-    for pred in ref_preds:
-        pid = pred.get("id")
-        if pid:
-            all_ids.add(pid)
-            if check_is_valid(pred, start_span_token, end_span_token):
-                valid_ids.add(pid)
-            else:
-                cheating_count += 1
-
-    print(f"Found {len(valid_ids)} valid IDs out of {len(all_ids)} total in '{reference_method}'.")
-    if cheating_count > 0:
-        print(f"Excluded {cheating_count} cheating examples from comparison set.")
+    valid_ids = get_valid_ids(ref_preds, reference_method, start_span_token, end_span_token)
 
     # Helper function to run evaluation on a specific set of IDs
     def run_evaluation_on_ids(target_ids, label):
@@ -236,6 +223,20 @@ def main():
         print(f"Ground Truth: {item['ground_truths']}")
         print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
         print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
+
+
+def get_valid_ids(ref_preds, reference_method: str, start_span_token, end_span_token) -> set[Any]:
+    # Check for validity in reference method
+    valid_ids = set()
+    for pred in ref_preds:
+        if check_is_valid(pred, start_span_token, end_span_token):
+            valid_ids.add(pred["id"])
+
+    cheating_count = len(ref_preds) - len(valid_ids)
+    print(f"Found {len(valid_ids)} valid IDs out of {len(ref_preds)} total in '{reference_method}'.")
+    if cheating_count > 0:
+        print(f"Excluded {cheating_count} cheating examples from comparison set.")
+    return valid_ids
 
 
 if __name__ == "__main__":
