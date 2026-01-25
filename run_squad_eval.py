@@ -5,7 +5,7 @@ import os
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
 
 
-def evaluate(predictions, ground_truths_map):
+def evaluate(predictions, ground_truths_data_map):
     """
     Evaluates predictions and returns per-datapoint F1 and EM scores.
     """
@@ -14,10 +14,10 @@ def evaluate(predictions, ground_truths_map):
         return results
 
     for pred_item in predictions:
-        # Use a tuple of (question, context) as the key to handle potential duplicate questions
-        key = (pred_item["question"], pred_item["context"])
+        # Use 'id' as the key
+        key = pred_item["id"]
         prediction_text = pred_item["prediction"]
-        ground_truths = ground_truths_map.get(key)
+        ground_truths = ground_truths_data_map.get(key)["answers"]
 
         f1 = 0.0
         em = 0.0
@@ -81,7 +81,7 @@ def main():
         print(f"Error: Ground truth file not found at {gt_path}")
         return
 
-    ground_truths_map = {(item["question"], item["context"]): item["answers"] for item in gt_data}
+    ground_truths_data_map = {item["id"]: item for item in gt_data}
 
     # Find and evaluate all prediction files in the input directory
     try:
@@ -163,7 +163,7 @@ def main():
             filtered_preds = [p for p in predictions if p["id"] in target_ids]
 
             # Get detailed results
-            detailed_results = evaluate(filtered_preds, ground_truths_map)
+            detailed_results = evaluate(filtered_preds, ground_truths_data_map)
             current_results_by_method[method_name] = detailed_results
 
             # Calculate and print averages
@@ -211,8 +211,10 @@ def main():
         diff = abs(standard_f1 - parallel_f1)
 
         if diff > 0:
-            question, context = key
-            ground_truths = ground_truths_map.get(key, [])
+            gt_item = ground_truths_data_map.get(key)
+            question = gt_item["question"]
+            context = gt_item["context"]
+            ground_truths = gt_item["answers"]
             differences.append({
                 "diff": diff,
                 "question": question,
