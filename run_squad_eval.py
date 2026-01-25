@@ -124,31 +124,36 @@ def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_ma
     current_results_by_method = {}
 
     for method_name, data in methods_data.items():
-        print(f"\nEvaluating '{method_name}'...")
-        predictions = data["results"]
-
-        # Filter predictions to only those in target_ids
-        filtered_preds = [p_data for p_id, p_data in predictions.items()
-                          if p_id in target_ids]
-
-        # Get detailed results
-        detailed_results = evaluate(filtered_preds, ground_truths_data_map)
+        detailed_results = run_evaluation_on_ids_one_method(data, method_name, ground_truths_data_map, target_ids)
         current_results_by_method[method_name] = detailed_results
 
-        # Calculate and print averages
-        if not detailed_results:
-            avg_f1, avg_em = 0.0, 0.0
-        else:
-            total_f1 = sum(res['f1'] for res in detailed_results.values())
-            total_em = sum(res['em'] for res in detailed_results.values())
-            count = len(detailed_results)
-            avg_f1 = total_f1 / count
-            avg_em = total_em / count
-
-        print(f"  Average F1 Score: {avg_f1:.4f}")
-        print(f"  Average Exact Match Score: {avg_em:.4f}")
-
     return current_results_by_method
+
+
+def run_evaluation_on_ids_one_method(data, method_name, ground_truths_data_map, target_ids) -> dict[Any, Any]:
+    print(f"\nEvaluating '{method_name}'...")
+    predictions = data["results"]
+
+    # Filter predictions to only those in target_ids
+    filtered_preds = [p_data for p_id, p_data in predictions.items()
+                      if p_id in target_ids]
+
+    # Get detailed results
+    detailed_results = evaluate(filtered_preds, ground_truths_data_map)
+
+    # Calculate and print averages
+    if not detailed_results:
+        avg_f1, avg_em = 0.0, 0.0
+    else:
+        total_f1 = sum(res['f1'] for res in detailed_results.values())
+        total_em = sum(res['em'] for res in detailed_results.values())
+        count = len(detailed_results)
+        avg_f1 = total_f1 / count
+        avg_em = total_em / count
+
+    print(f"  Average F1 Score: {avg_f1:.4f}")
+    print(f"  Average Exact Match Score: {avg_em:.4f}")
+    return detailed_results
 
 
 def main():
@@ -199,8 +204,27 @@ def main():
     diff_prediction_ids = get_diff_prediction_span(
         methods_data[reference_method],
         methods_data["parallel_multiple_diff"],
-        diff_tokens_ids
+        diff_texts_ids
     )
+
+    print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids)
+
+    # Get score difference 'valid+same' vs 'valid+different' prediction
+    valid_same = valid_ids - diff_prediction_ids
+    run_evaluation_on_ids_one_method(
+        methods_data["parallel_multiple_diff"],
+        f"Parallel Multiple on ids with identical predictions ({len(valid_same)} samples)",
+        ground_truths_data_map,
+        valid_same,
+    )
+
+    run_evaluation_on_ids_one_method(
+        methods_data["parallel_multiple_diff"],
+        f"Parallel Multiple on ids with different predictions ({len(diff_prediction_ids)} samples)",
+        ground_truths_data_map,
+        diff_prediction_ids,
+    )
+
 
     # 3. Run evaluation on ALL IDs (Incorrect Analysis)
     run_evaluation_on_ids(
@@ -263,6 +287,35 @@ def main():
         print(f"Ground Truth: {item['ground_truths']}")
         print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
         print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
+
+
+def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids):
+    n_all = len(all_ids)
+    n_valid = len(valid_ids)
+    n_invalid = n_all - n_valid
+
+    n_diff_tok = len(diff_tokens_ids)
+    n_same_tok = n_valid - n_diff_tok
+
+    n_diff_text = len(diff_texts_ids)
+    n_same_text = n_diff_tok - n_diff_text
+
+    n_diff_pred = len(diff_prediction_ids)
+    n_same_pred = n_diff_text - n_diff_pred
+
+    def pct(n, total):
+        if total == 0: return "0.0%"
+        return f"({n / total * 100:.1f}%)"
+
+    print(f"ALL {n_all}")
+    print(f"-- invalid {n_invalid} {pct(n_invalid, n_all)}")
+    print(f"-- valid {n_valid} {pct(n_valid, n_all)}")
+    print(f"  -- same tokenization {n_same_tok} {pct(n_same_tok, n_valid)}")
+    print(f"  -- different tokenization {n_diff_tok} {pct(n_diff_tok, n_valid)}")
+    print(f"    -- same raw output {n_same_text} {pct(n_same_text, n_diff_tok)}")
+    print(f"    -- different raw output {n_diff_text} {pct(n_diff_text, n_diff_tok)}")
+    print(f"      -- same prediction {n_same_pred} {pct(n_same_pred, n_diff_text)}")
+    print(f"      -- different prediction {n_diff_pred} {pct(n_diff_pred, n_diff_text)}")
 
 
 def parse_args() -> Namespace:
