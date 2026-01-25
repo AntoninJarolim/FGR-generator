@@ -140,7 +140,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
                 **record,
                 "prediction": answer,
                 "raw_output": generated,
-                "generated_ids": generated_ids,
+                "ctx_enc": generated_ids,
             }
         )
     return results

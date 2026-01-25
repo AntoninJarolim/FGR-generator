@@ -29,6 +29,7 @@ def evaluate(predictions, ground_truths_map):
             "f1": f1,
             "em": em,
             "prediction": prediction_text,
+            "ctx_enc": pred_item["ctx_enc"],
         }
     return results
 
@@ -46,6 +47,24 @@ def check_is_valid(record, start_token, end_token):
     cleaned_output = raw_output.replace(start_token, "").replace(end_token, "")
 
     return normalize_text(cleaned_output) == normalize_text(context)
+
+
+def check_score_diff_conditioned_on_tokenization(standard_results, parallel_results):
+    diff_scores_set = set()
+    for key in standard_results.keys():
+
+        st_obj = standard_results[key]
+        pl_obj = parallel_results[key]
+
+        if st_obj["f1"] != pl_obj["f1"]:
+            diff_scores_set.add(key)
+
+
+    for key in diff_scores_set:
+        assert standard_results[key]["ctx_enc"] != parallel_results[key]["ctx_enc"]
+
+    print("For all different scores, the tokenization is different.")
+
 
 
 def main():
@@ -171,47 +190,50 @@ def main():
 
     # Comparison logic (using valid IDs results)
     results_by_method = results_by_method_valid
+    
+    if not "standard" in results_by_method or not "parallel_multiple_diff" in results_by_method:
+        print("\nSkipping comparison: 'standard' and/or 'parallel_multiple_diff' results not found.")
+        exit(0)
 
     print("Printing some examples of differences only on non-cheating examples.")
-    if "standard" in results_by_method and "parallel_multiple_diff" in results_by_method:
-        standard_results = results_by_method["standard"]
-        parallel_results = results_by_method["parallel_multiple_diff"]
+    standard_results = results_by_method["standard"]
+    parallel_results = results_by_method["parallel_multiple_diff"]
+    
+    check_score_diff_conditioned_on_tokenization(standard_results, parallel_results)
+    
+    differences = []
+    common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
+    print(f"Length of Common  (standard and. parallel_multiple_diff): {len(common_keys)}")
 
-        differences = []
-        common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
-        print(f"Length of Common  (standard and. parallel_multiple_diff): {len(common_keys)}")
+    for key in common_keys:
+        standard_f1 = standard_results[key]["f1"]
+        parallel_f1 = parallel_results[key]["f1"]
+        diff = abs(standard_f1 - parallel_f1)
 
-        for key in common_keys:
-            standard_f1 = standard_results[key]["f1"]
-            parallel_f1 = parallel_results[key]["f1"]
-            diff = abs(standard_f1 - parallel_f1)
+        if diff > 0:
+            question, context = key
+            ground_truths = ground_truths_map.get(key, [])
+            differences.append({
+                "diff": diff,
+                "question": question,
+                "context": context,
+                "ground_truths": ground_truths,
+                "standard_f1": standard_f1,
+                "parallel_f1": parallel_f1,
+                "standard_pred": standard_results[key]["prediction"],
+                "parallel_pred": parallel_results[key]["prediction"],
+            })
 
-            if diff > 0:
-                question, context = key
-                ground_truths = ground_truths_map.get(key, [])
-                differences.append({
-                    "diff": diff,
-                    "question": question,
-                    "context": context,
-                    "ground_truths": ground_truths,
-                    "standard_f1": standard_f1,
-                    "parallel_f1": parallel_f1,
-                    "standard_pred": standard_results[key]["prediction"],
-                    "parallel_pred": parallel_results[key]["prediction"],
-                })
+    differences.sort(key=lambda x: x["diff"], reverse=True)
 
-        differences.sort(key=lambda x: x["diff"], reverse=True)
-
-        print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple_diff) ---")
-        for i, item in enumerate(differences[:30]):
-            print(f"\n--- Example {i + 1} (Diff: {item['diff']:.4f}) ---")
-            print(f"Question: {item['question']}")
-            print(f"Context: {item['context']}")
-            print(f"Ground Truth: {item['ground_truths']}")
-            print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
-            print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
-    else:
-        print("\nSkipping comparison: 'standard' and/or 'parallel_multiple_diff' results not found.")
+    print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple_diff) ---")
+    for i, item in enumerate(differences[:30]):
+        print(f"\n--- Example {i + 1} (Diff: {item['diff']:.4f}) ---")
+        print(f"Question: {item['question']}")
+        print(f"Context: {item['context']}")
+        print(f"Ground Truth: {item['ground_truths']}")
+        print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
+        print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
 
 
 if __name__ == "__main__":
