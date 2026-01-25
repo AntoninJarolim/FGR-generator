@@ -354,6 +354,7 @@ def main():
         "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
         "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
     }
+    
     common_params = {
         "model": model,
         "data": data,
@@ -362,8 +363,10 @@ def main():
         "end_span_token": args.end_span_token,
     }
 
-
     for method_name in generation_methods:
+        if method_name != "all" and method_name != args.method:
+            continue
+        
         assert method_name in generation_methods, f"'{method_name}' method is not implemented."
 
         run_and_save_results(
