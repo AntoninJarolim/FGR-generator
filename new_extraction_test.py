@@ -106,6 +106,15 @@ def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_a
     plt.show()
 
 
+def append_one_token_batched(x, one_token):
+    return torch.cat(
+        [
+            x,
+            one_token.repeat(x.size(0))[:, None]
+        ],
+        dim=1
+    )
+
 # -----------------------------
 # Loop functions
 # -----------------------------
@@ -293,6 +302,88 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
     return results
 
 
+def generate_parallel_answers_tokens_only(model, data, template, start_span_token, end_span_token):
+    start_span_str = start_span_token
+    end_span_str = end_span_token
+
+    tokens_finder = TokenByteFinder(model.tokenizer)
+    start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
+    end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
+
+    start_span_token_id = tokens_finder.get_singe_token(start_span_str)
+    end_span_token_id = tokens_finder.get_singe_token(end_span_str)
+
+    start_span_token_id = torch.tensor([start_span_token_id], dtype=torch.int)
+    end_span_token_id = torch.tensor([end_span_token_id], dtype=torch.int)
+
+    data = remove_special_tokens(data, end_span_str, start_span_str)
+
+    results = TimedList()
+    for record in tqdm.tqdm(data, desc="Parallel diff generation"):
+        context = record['context']
+        question = record['question']
+        gt_span_pos = get_token_span(model.tokenizer, context, find_span(context, record['answer'][0]))
+
+        prompt = create_prompt(
+            template,
+            start_span_token=start_span_str,
+            end_span_token=end_span_str,
+            question=question,
+            context=context
+        )
+
+        logits, ctx_enc = model.encode_ctx(prompt, context)
+        start = lowest_index_greater_zero(
+            logits,
+            start_span_tokens_id,
+            plot_label="Start",
+            gt_range=gt_span_pos
+        )
+
+        before = append_one_token_batched(ctx_enc[:, :start], start_span_token_id)
+        tmp_after = ctx_enc[:, start:]
+
+        logits, ctx_enc = model.encode_ctx(prompt, context=tmp_after, before=before)
+        end = lowest_index_greater_zero(
+            logits,
+            end_span_tokens_id,
+            plot_label="End", gt_range=gt_span_pos, start_index=start
+        )
+
+        middle = ctx_enc[:, :end]
+        after = ctx_enc[:, end:]
+
+        annotated_tokens = torch.cat([
+                before,
+                append_one_token_batched(middle, end_span_token_id),
+                after
+            ],
+            dim=1
+        )[0].tolist()
+
+        annotated = model.tokenizer.decode(annotated_tokens)
+        answer = model.tokenizer.decode(middle[0])
+
+        # print_topk_logits_decoded(
+        #     tokens_finder,
+        #     model.tokenizer,
+        #     logits,
+        #     start_span_tokens_id=start_span_tokens_id,
+        # )
+
+        results.append(
+            {
+                **record,
+                "prediction": answer,
+                "raw_output": annotated,
+                "ctx_enc": annotated_tokens,
+                "start": start,
+                "end": end,
+            }
+        )
+    return results
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM extractive QA processing.")
 
@@ -380,6 +471,7 @@ def main():
         "parallel": functools.partial(generate_parallel_answers, one_char=True),
         "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
         "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
+        "generate_parallel_answers_tokens_only": functools.partial(generate_parallel_answers_tokens_only),
     }
     
     common_params = {

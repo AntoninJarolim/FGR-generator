@@ -120,35 +120,27 @@ class LLMRunner:
         generated_text = self.tokenizer.decode(generated[0][input_size:], skip_special_tokens=True)
         return generated_text
 
-    def encode_ctx(self, template, context) -> str:
+    def encode_ctx(self, template, context, before=None) -> str:
         # tokenize template and context independently
-        tmpl_enc = self.tokenizer(
-            template,
-            return_tensors="pt"
-        )
+        tmpl_enc = self.tokenizer(template, return_tensors="pt")["input_ids"]
 
-        if context[0] != " ":
-            context = " " + context
+        if type(context) == str:
+            ctx_enc = self.tokenizer(
+                context,
+                add_special_tokens=False,
+                return_tensors="pt"
+            )["input_ids"]
+        else:
+            ctx_enc = context
 
-        ctx_enc = self.tokenizer(
-            context,
-            add_special_tokens=False,
-            return_tensors="pt"
-        )
+        concat = [tmpl_enc, ctx_enc] if before is None else [tmpl_enc, before, ctx_enc]
+        input_ids = torch.cat(concat, dim=1).to(self.device)
 
-        context_len = ctx_enc["input_ids"].size(1)
+        logits = self.model(input_ids=input_ids)['logits']
 
-        input_ids = torch.cat(
-            [tmpl_enc["input_ids"], ctx_enc["input_ids"]],
-            dim=1
-        ).to(self.device)
-
-        outputs = self.model(
-            input_ids=input_ids,
-            # attention_mask=attention_mask
-        )
-
-        return outputs['logits'][:, -context_len - 1:], ctx_enc["input_ids"].tolist()[0]
+        context_len = ctx_enc.size(1)
+        logits_ctx = logits[:, -context_len - 1:]
+        return logits_ctx, ctx_enc
 
     def append_eos_token_id(self, tokens):
         eos_id = self.tokenizer.eos_token_id

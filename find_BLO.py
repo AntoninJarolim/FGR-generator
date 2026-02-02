@@ -59,6 +59,15 @@ class TokenByteFinder:
             for t, t_id in self.vocab.items()
         }
 
+    def get_singe_token(self, char):
+        single_id = self.tokenizer.encode(char, add_special_tokens=False)
+        if len(single_id) == 1:
+            return single_id[0]
+        raise AssertionError("Char encoded is not a single token")
+
+
+
+
     def find_prefix_overlaps(self, target_bytes):
         target_bytes = encode_str_utf8(target_bytes)
 
