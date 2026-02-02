@@ -125,8 +125,8 @@ def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
     diff_pred_ids = set()
     for k in ids_to_inspect:
         assert not exact_match_score(standard_data[k]['prediction'], parallel_data[k]['prediction'])
-        print(f"Std pred: '{standard_data[k]['prediction']}'")
-        print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
+        # print(f"Std pred: '{standard_data[k]['prediction']}'")
+        # print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
 
         # Get the index of the token starting <start> tag
         std_start = standard_data[k]['start']
@@ -202,6 +202,7 @@ def main():
 
     assert "standard" in methods_data
     reference_method = "standard"
+    compare_method = args.compare_method
     print(f"Using '{reference_method}' as the reference for valid IDs.")
 
     ref_data = methods_data[reference_method]
@@ -221,25 +222,25 @@ def main():
     # Find differences of context tokenization
     diff_tokens_ids = get_diff_tokens_ids(
         methods_data[reference_method],
-        methods_data["parallel_multiple_diff"],
+        methods_data[compare_method],
         valid_ids
     )
 
     diff_texts_ids = get_diff_raw_outputs(
         methods_data[reference_method],
-        methods_data["parallel_multiple_diff"],
+        methods_data[compare_method],
         diff_tokens_ids
     )
 
     diff_prediction_ids = get_diff_prediction_span(
         methods_data[reference_method],
-        methods_data["parallel_multiple_diff"],
+        methods_data[compare_method],
         diff_texts_ids
     )
 
     diff_toks_bef_start = get_diff_toks_bef_start(
         methods_data[reference_method],
-        methods_data["parallel_multiple_diff"],
+        methods_data[compare_method],
         diff_prediction_ids
     )
 
@@ -248,15 +249,15 @@ def main():
     # Get score difference 'valid+same' vs 'valid+different' prediction
     valid_same = valid_ids - diff_prediction_ids
     run_evaluation_on_ids_one_method(
-        methods_data["parallel_multiple_diff"],
-        f"Parallel Multiple on ids with identical predictions ({len(valid_same)} samples)",
+        methods_data[compare_method],
+        f"{compare_method} on ids with identical predictions ({len(valid_same)} samples)",
         ground_truths_data_map,
         valid_same,
     )
 
     run_evaluation_on_ids_one_method(
-        methods_data["parallel_multiple_diff"],
-        f"Parallel Multiple on ids with different predictions ({len(diff_prediction_ids)} samples)",
+        methods_data[compare_method],
+        f"{compare_method} on ids with different predictions ({len(diff_prediction_ids)} samples)",
         ground_truths_data_map,
         diff_prediction_ids,
     )
@@ -280,17 +281,17 @@ def main():
     # Comparison logic (using valid IDs results)
     results_by_method = results_by_method_valid
 
-    if not "standard" in results_by_method or not "parallel_multiple_diff" in results_by_method:
-        print("\nSkipping comparison: 'standard' and/or 'parallel_multiple_diff' results not found.")
+    if not "standard" in results_by_method or not compare_method in results_by_method:
+        print(f"\nSkipping comparison: 'standard' and/or '{compare_method}' results not found.")
         exit(0)
 
     print("Printing some examples of differences only on non-cheating examples.")
     standard_results = results_by_method["standard"]
-    parallel_results = results_by_method["parallel_multiple_diff"]
+    parallel_results = results_by_method[compare_method]
 
     differences = []
     common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
-    print(f"Length of Common  (standard and. parallel_multiple_diff): {len(common_keys)}")
+    print(f"Length of Common  (standard and {compare_method}): {len(common_keys)}")
 
     for key in common_keys:
         standard_f1 = standard_results[key]["f1"]
@@ -315,7 +316,7 @@ def main():
 
     differences.sort(key=lambda x: x["diff"], reverse=True)
 
-    print("\n\n--- Top 30 F1 Score Differences (standard vs. parallel_multiple_diff) ---")
+    print(f"\n\n--- Top 30 F1 Score Differences (standard vs. {compare_method}) ---")
     for i, item in enumerate(differences[:30]):
         print(f"\n--- Example {i + 1} (Diff: {item['diff']:.4f}) ---")
         print(f"Question: {item['question']}")
@@ -362,6 +363,7 @@ def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_id
 def parse_args() -> Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
     parser.add_argument("input_dir", help="Path to the directory with prediction files.")
+    parser.add_argument("--compare_method", default="parallel_multiple_diff", help="Method to compare against standard (default: parallel_multiple_diff)")
     args = parser.parse_args()
     return args
 
