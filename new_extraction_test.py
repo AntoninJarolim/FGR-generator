@@ -9,7 +9,8 @@ from jinja2 import Template
 from torch import newaxis
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner, get_model_config
-from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span
+from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
+    find_first_token, find_last_token
 from utils.squad_dataset import load_or_create_gt_data
 from utils.other import TimedList
 
@@ -115,6 +116,7 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
 
     tokens_finder = TokenByteFinder(model.tokenizer)
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_token)
+    end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_token)
 
     for record in tqdm.tqdm(data, desc="Standard generation"):
         prompt = create_prompt(
@@ -126,7 +128,30 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
         )
 
         logits, generated, generated_ids = model.tokenize_run(prompt)
-        answer = extract_span(start_span_token, end_span_token, generated)
+        answer, start_ch, end_ch = extract_span(
+            start_span_token,
+            end_span_token,
+            generated,
+            return_start_end=True
+        )
+
+        if start_ch == -1 or end_ch == -1:
+            start_tok = None
+            end_tok = None
+        else:
+            generated_before = generated[:start_ch]
+            generated_after = generated[end_ch:]
+
+            start_tok = find_first_token(generated_before, generated_ids, model.tokenizer)
+            end_tok = find_last_token(generated_after, generated_ids, model.tokenizer)
+
+            if generated_ids[start_tok] not in start_span_tokens_id:
+                print(f"Warning generated_ids[start_tok] {generated_ids[start_tok]}")
+                print(f"\tcontext: generated_ids[start_tok-2:start_tok+2] {generated_ids[start_tok-2:start_tok+2]}")
+
+            if generated_ids[end_tok] not in end_span_tokens_id:
+                print(f"Warning generated_ids[end_tok] {generated_ids[end_tok]}")
+                print(f"\tcontext: generated_ids[end_tok-2:end_tok+2] {generated_ids[end_tok-2:end_tok+2]}")
 
         # print_topk_logits_decoded(
         #     tokens_finder,
@@ -141,6 +166,8 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
                 "prediction": answer,
                 "raw_output": generated,
                 "ctx_enc": generated_ids,
+                "start": start_tok,
+                "end": end_tok,
             }
         )
     return results
@@ -239,7 +266,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
         #     start_span_tokens_id=start_span_tokens_id,
         # )
 
-        prompt_ctx = prompt + start_context + start_span_str
+        prompt_ctx = prompt + start_context + " " + start_span_str
         if end_context == "":
             annotated = start_context + start_span_str + end_span_str
             end = None
@@ -249,7 +276,7 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
             end = lowest_index_greater_zero(logits, end_span_tokens_id, plot_label="end", gt_range=gt_span_pos,
                                             start_index=start)
             end_start, end_end = model.split_context_by_token_pos(end_context, end)
-            annotated = start_context + start_span_str + end_start + end_span_str + end_end
+            annotated = start_context + " " + start_span_str + end_start + end_span_str + end_end
 
         answer = extract_span(start_span_str, end_span_str, annotated)
 

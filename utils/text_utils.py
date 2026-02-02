@@ -76,13 +76,18 @@ def find_span(context: str, span: str) -> tuple[int, int]:
     return start, end
 
 
-def extract_span(start_str, end_str, generated_text):
+def extract_span(start_str, end_str, generated_text, return_start_end=False):
     """Extract text between start and end tokens."""
     start_idx = generated_text.find(start_str)
     end_idx = generated_text.find(end_str, start_idx + 1)
+    ans = ""
     if start_idx != -1 and end_idx != -1:
-        return generated_text[start_idx + len(start_str):end_idx]
-    return ""
+        ans = generated_text[start_idx + len(start_str):end_idx]
+
+    if return_start_end:
+        return ans, start_idx, end_idx
+
+    return ans
 
 
 def remove_special_token(text, *args, error_on_detection=False):
@@ -115,3 +120,29 @@ def get_token_span(tokenizer, text, char_span):
     assert token_start is not None
 
     return token_start, token_end
+
+
+def find_first_token(generated_before, generated_ids, tokenizer):
+    for i in range(1, len(generated_ids)):
+        cur_text = tokenizer.decode(
+            generated_ids[:i],
+            skip_special_tokens=False,
+        )
+        if cur_text.startswith(generated_before):
+            return i - 1
+    return None
+
+
+def find_last_token(generated_after, generated_ids, tokenizer):
+    # Remove EOS from the end for the ends of the strings to be equivalent
+    if generated_ids[-1] == tokenizer.eos_token_id:
+        generated_ids = generated_ids[:-1]
+
+    for i in range(len(generated_ids) - 1, -1, -1):
+        cur_text = tokenizer.decode(
+            generated_ids[i:],
+            skip_special_tokens=False,
+        )
+        if cur_text.endswith(generated_after):
+            return i
+    return None
