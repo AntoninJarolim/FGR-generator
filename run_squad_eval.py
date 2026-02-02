@@ -117,6 +117,36 @@ def get_diff_prediction_span(standard_data, parallel_data, ids_to_inspect):
 
 
 # Helper function to run evaluation on a specific set of IDs
+def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
+    standard_data = standard_data["results"]
+    parallel_data = parallel_data["results"]
+
+
+    diff_pred_ids = set()
+    for k in ids_to_inspect:
+        assert not exact_match_score(standard_data[k]['prediction'], parallel_data[k]['prediction'])
+        print(f"Std pred: '{standard_data[k]['prediction']}'")
+        print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
+
+        # Get the index of the token starting <start> tag
+        std_start = standard_data[k]['start']
+        prl_start = parallel_data[k]['start']
+
+        if not std_start or not prl_start:
+            continue
+
+        start_i = min(std_start, prl_start)
+
+        std_ctx_start = standard_data[k]['ctx_enc'][:start_i]
+        prl_ctx_start = parallel_data[k]['ctx_enc'][:start_i]
+
+        # finding different starts in the ctx - teacher forcing different tokens
+        if std_ctx_start != prl_ctx_start:
+            diff_pred_ids.add(k)
+
+    return diff_pred_ids
+
+
 def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_map):
     print(f"\n\n{'=' * 20} Running Evaluation: {label} {'=' * 20}")
     print(f"Evaluating on {len(target_ids)} IDs.")
@@ -207,7 +237,13 @@ def main():
         diff_texts_ids
     )
 
-    print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids)
+    diff_toks_bef_start = get_diff_toks_bef_start(
+        methods_data[reference_method],
+        methods_data["parallel_multiple_diff"],
+        diff_prediction_ids
+    )
+
+    print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids, diff_toks_bef_start)
 
     # Get score difference 'valid+same' vs 'valid+different' prediction
     valid_same = valid_ids - diff_prediction_ids
@@ -289,7 +325,7 @@ def main():
         print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
 
 
-def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids):
+def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids, diff_toks_bef_start):
     n_all = len(all_ids)
     n_valid = len(valid_ids)
     n_invalid = n_all - n_valid
@@ -302,6 +338,9 @@ def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_id
 
     n_diff_pred = len(diff_prediction_ids)
     n_same_pred = n_diff_text - n_diff_pred
+
+    n_diff_toks_bef = len(diff_toks_bef_start)
+    n_same_toks_bef = n_diff_pred - n_diff_toks_bef
 
     def pct(n, total):
         if total == 0: return "0.0%"
@@ -316,6 +355,8 @@ def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_id
     print(f"    -- different raw output {n_diff_text} {pct(n_diff_text, n_diff_tok)}")
     print(f"      -- same prediction {n_same_pred} {pct(n_same_pred, n_diff_text)}")
     print(f"      -- different prediction {n_diff_pred} {pct(n_diff_pred, n_diff_text)}")
+    print(f"        -- same ctx tokens before start {n_same_toks_bef} {pct(n_same_toks_bef, n_diff_pred)}")
+    print(f"        -- different ctx tokens before start {n_diff_toks_bef} {pct(n_diff_toks_bef, n_diff_pred)}")
 
 
 def parse_args() -> Namespace:
