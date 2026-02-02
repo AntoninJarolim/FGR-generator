@@ -1,3 +1,5 @@
+import os
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
@@ -173,38 +175,42 @@ class LLMRunner:
         right_tokens = token_ids[start_context:]
 
         # Decode back to text
-        left_text = self.tokenizer.decode(left_tokens, skip_special_tokens=True)
-        right_text = self.tokenizer.decode(right_tokens, skip_special_tokens=True)
+        left_text = self.tokenizer.decode(left_tokens, skip_special_tokens=True).strip()
+        right_text = self.tokenizer.decode(right_tokens, skip_special_tokens=True).strip()
 
         return left_text, right_text
 
 
 def get_model_config(model):
-    tokenizer_info = {}
-    gen_config = {}
-    if model:
-        # Prefer HF identifier if available, otherwise fallback to name_or_path
-        # Checking if name_or_path looks like a local absolute path
-        model_id = model.tokenizer.name_or_path
-        if os.path.isabs(model_id):
-             # Try to find a config attribute that might hold the original hub name, or just fallback
-             # Often 'name_or_path' is what we have. If it's a local path, the user might have provided a local path.
-             # However, the user request specifically asked to store "hf-identifier".
-             # If the tokenizer was loaded from a local path, we might not have the original HF ID easily unless preserved.
-             # But commonly, name_or_path IS the HF ID unless locally saved.
-             pass
+    try:
+        tokenizer_info = {}
+        gen_config = {}
+        if model:
+            # Prefer HF identifier if available, otherwise fallback to name_or_path
+            # Checking if name_or_path looks like a local absolute path
+            model_id = model.tokenizer.name_or_path
+            if os.path.isabs(model_id):
+                 # Try to find a config attribute that might hold the original hub name, or just fallback
+                 # Often 'name_or_path' is what we have. If it's a local path, the user might have provided a local path.
+                 # However, the user request specifically asked to store "hf-identifier".
+                 # If the tokenizer was loaded from a local path, we might not have the original HF ID easily unless preserved.
+                 # But commonly, name_or_path IS the HF ID unless locally saved.
+                 pass
 
-        tokenizer_info = {
-            "name_or_path": model_id,
-            "vocab_size": len(model.tokenizer),
-        }
-        # Filter for most relevant generation parameters
-        full_config = model.model.generation_config.to_dict()
-        gen_config = {
-            k: v for k, v in full_config.items()
-            if k in ["max_new_tokens", "do_sample", "temperature", "top_k", "top_p", "repetition_penalty"]
-        }
-        # Ensure LLMRunner specific overrides are captured if not in generation_config
-        gen_config["max_new_tokens"] = model.max_new_tokens
+            tokenizer_info = {
+                "name_or_path": model_id,
+                "vocab_size": len(model.tokenizer),
+            }
+            # Filter for most relevant generation parameters
+            full_config = model.model.generation_config.to_dict()
+            gen_config = {
+                k: v for k, v in full_config.items()
+                if k in ["max_new_tokens", "do_sample", "temperature", "top_k", "top_p", "repetition_penalty"]
+            }
+            # Ensure LLMRunner specific overrides are captured if not in generation_config
+            gen_config["max_new_tokens"] = model.max_new_tokens
+    except:
+        print(f"Error in get_model_config")
+        return None, None
 
     return tokenizer_info, gen_config
