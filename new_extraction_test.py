@@ -400,7 +400,7 @@ def parse_args():
     parser.add_argument("--template_path", type=str, required=True, help="Path to the Jinja template.")
     parser.add_argument("--method", type=str,
                         choices=['standard', 'standard_custom_decode',
-                                 'parallel', 'parallel_multiple', 'parallel_multiple_diff',
+                                 'parallel', 'parallel_multiple', 'parallel_multiple_diff', 'parallel_tokens_only',
                                  'all'],
                         default='all',
                         help="Which method to run and save.")
@@ -471,7 +471,7 @@ def main():
         "parallel": functools.partial(generate_parallel_answers, one_char=True),
         "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
         "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
-        "generate_parallel_answers_tokens_only": functools.partial(generate_parallel_answers_tokens_only),
+        "parallel_tokens_only": functools.partial(generate_parallel_answers_tokens_only),
     }
     
     common_params = {
