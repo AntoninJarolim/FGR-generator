@@ -381,13 +381,14 @@ def assert_coherent_params(methods_data: dict[Any, Any], reference_method: str):
     Check that all the methods were generated using the same generation params.
     Invalid comparison would arise otherwise
     """
-    assert all(
-        [
-            # start and end span tokens must match for valid comparison
-            data['parameters'] == methods_data[reference_method]['parameters']
-            for method_name, data in methods_data.items()
-        ]
-    )
+    ref_params = methods_data[reference_method]["parameters"]
+
+    for method_name, data in methods_data.items():
+        assert data["parameters"] == ref_params, (
+            f"Parameter mismatch for method '{method_name}'. "
+            f"Expected {ref_params}, got {data['parameters']}."
+        )
+
 
 
 def load_all_data(args: Namespace, prediction_files: list[str | Literal['gt.json']]) -> dict[Any, Any]:
