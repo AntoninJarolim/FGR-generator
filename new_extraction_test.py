@@ -110,7 +110,7 @@ def append_one_token_batched(x, one_token):
     return torch.cat(
         [
             x,
-            one_token.repeat(x.size(0))[:, None]
+            one_token.repeat(x.size(0), 1)
         ],
         dim=1
     )
@@ -310,11 +310,8 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
     end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
 
-    start_span_token_id = tokens_finder.get_singe_token(start_span_str)
-    end_span_token_id = tokens_finder.get_singe_token(end_span_str)
-
-    start_span_token_id = torch.tensor([start_span_token_id], dtype=torch.int)
-    end_span_token_id = torch.tensor([end_span_token_id], dtype=torch.int)
+    start_span_token_id = tokens_finder.get_single_token(start_span_str)
+    end_span_token_id = tokens_finder.get_single_token(end_span_str)
 
     data = remove_special_tokens(data, end_span_str, start_span_str)
 
