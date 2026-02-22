@@ -263,6 +263,22 @@ def main():
         diff_prediction_ids,
     )
 
+    # Get score difference 'valid+same' vs 'valid+different' prediction
+    valid_same = valid_ids - diff_prediction_ids
+    run_evaluation_on_ids_one_method(
+        methods_data[compare_method],
+        f"{compare_method} on ids with identical prefix ({len(valid_same)} samples)",
+        ground_truths_data_map,
+        valid_same,
+    )
+
+    run_evaluation_on_ids_one_method(
+        methods_data[compare_method],
+        f"{compare_method} on ids with different prefix ({len(diff_prediction_ids)} samples)",
+        ground_truths_data_map,
+        diff_prediction_ids,
+    )
+
 
     # 3. Run evaluation on ALL IDs (Incorrect Analysis)
     run_evaluation_on_ids(
