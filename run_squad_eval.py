@@ -125,8 +125,9 @@ def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
     diff_pred_ids = set()
     for k in ids_to_inspect:
         assert not exact_match_score(standard_data[k]['prediction'], parallel_data[k]['prediction'])
-        # print(f"Std pred: '{standard_data[k]['prediction']}'")
-        # print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
+        print(f"ID{standard_data[k]['id']}")
+        print(f"Std pred: '{standard_data[k]['prediction']}'")
+        print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
 
         # Get the index of the token starting <start> tag
         std_start = standard_data[k]['start']
