@@ -106,7 +106,9 @@ def plot_logits_at_positions(plot_label, pos, selected_logits, gt_range, start_a
     plt.show()
 
 
-def append_one_token_batched(x, one_token):
+def append_tokens_batched(x, append_toks):
+    if isinstance(append_toks, list):
+        append_toks = torch.tensor(append_toks)
     return torch.cat(
         [
             x,
