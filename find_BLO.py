@@ -4,6 +4,8 @@ Find tokens whose byte encodings can generate a target UTF-8 string
 via prefix overlap or containment, using the tokenizer of a specified
 language model.
 """
+from collections import defaultdict
+
 from transformers import AutoTokenizer
 
 
@@ -34,15 +36,6 @@ def bytes_to_unicode():
     return dict(zip(bs, cs))
 
 
-def encode_str_utf8(any_string):
-    if type(any_string) == str:
-        return any_string.encode("utf-8")
-    elif type(any_string) == bytes:
-        return any_string
-    else:
-        raise TypeError()
-
-
 class TokenByteFinder:
     def __init__(self, tokenizer):
         if isinstance(tokenizer, str):
@@ -65,7 +58,7 @@ class TokenByteFinder:
         return single_id
 
     def find_prefix_overlaps(self, target_bytes):
-        target_bytes = encode_str_utf8(target_bytes)
+        target_bytes = self.encode_str_utf8(target_bytes)
 
         prefix_overlaps = {}
         for tok_id, b in self.token_bytes.items():
@@ -77,7 +70,7 @@ class TokenByteFinder:
         return prefix_overlaps
 
     def find_containment_tokens(self, target_bytes):
-        target_bytes = encode_str_utf8(target_bytes)
+        target_bytes = self.encode_str_utf8(target_bytes)
 
         containment = {
             tok_id: b for tok_id, b in self.token_bytes.items()
@@ -86,7 +79,7 @@ class TokenByteFinder:
         return containment
 
     def find_starting_with(self, target_bytes):
-        target_bytes = encode_str_utf8(target_bytes)
+        target_bytes = self.encode_str_utf8(target_bytes)
         target_bytes_starts = [
             target_bytes[:k] for k in range(1, len(target_bytes) + 1)
         ]
@@ -98,7 +91,7 @@ class TokenByteFinder:
         return containment
 
     def get_generating_tokens(self, any_string):
-        target_bytes = encode_str_utf8(any_string)
+        target_bytes = self.encode_str_utf8(any_string)
         prefix_overlaps = self.find_prefix_overlaps(target_bytes)
         containment = self.find_containment_tokens(target_bytes)
 
@@ -107,7 +100,7 @@ class TokenByteFinder:
         return generating_tokens
 
     def get_generating_tokens_all(self, any_string):
-        target_bytes = encode_str_utf8(any_string)
+        target_bytes = self.encode_str_utf8(any_string)
         prefix_overlaps = self.find_prefix_overlaps(target_bytes)
         containment = self.find_containment_tokens(target_bytes)
 
@@ -125,6 +118,8 @@ class TokenByteFinder:
         return None
 
     def find_all_paths(self, target_bytes):
+        target_bytes = self.encode_str_utf8(target_bytes)
+
         generating_tokens = self.get_generating_tokens_all(target_bytes)
         path_list = [[(k, v)] for k, v in generating_tokens.items()]
         max_size = 5
@@ -158,6 +153,54 @@ class TokenByteFinder:
                    for new_path in longer_path_list):
                 break
         return path_list
+
+
+    def get_next_valid_dict(self, target_bytes):
+        path_list = self.find_all_paths(target_bytes)
+        path_list = [[k for k, _ in path] for path in path_list]
+        paths_to_prefixes = paths_to_prefix_dict(path_list)
+        return paths_to_prefixes
+
+    def get_valid_next_func(self, target_bytes):
+        paths_to_prefixes = self.get_next_valid_dict(target_bytes)
+
+        def f(target_list):
+            return get_valid_next(paths_to_prefixes, target_list)
+
+        return f
+
+    def encode_str_utf8(self, any_string):
+        if type(any_string) == int:
+            # Remove whitespaces
+            any_string = self.tokenizer.decode(any_string).strip()
+        if type(any_string) == str:
+            return any_string.encode("utf-8")
+        elif type(any_string) == bytes:
+            return any_string
+        else:
+            raise TypeError()
+
+def get_valid_next(prefix_dict, target_list):
+    out = []
+    t = tuple(target_list)
+
+    for key, values in prefix_dict.items():
+        if len(key) <= len(t) and t[-len(key):] == key:
+            out.extend(values)
+
+    return out
+
+
+def paths_to_prefix_dict(path_list: list[list[int]]):
+    out = defaultdict(list)
+
+    for path in path_list:
+        for i in range(len(path) - 1):
+            prefix = tuple(path[:i+1])
+            next_val = path[i+1]
+            out[prefix].append(next_val)
+
+    return dict(out)
 
 
 def bytes_to_hex(b: bytes) -> str:
@@ -250,7 +293,7 @@ if __name__ == "__main__":
     oracle = TokenByteFinder(MODEL_NAME)
 
     # The get_generating_tokens method can be used to get the combined list of tokens
-    TARGET_UTF_BYTES = encode_str_utf8(TARGET_UTF)
+    TARGET_UTF_BYTES = oracle.encode_str_utf8(TARGET_UTF)
 
 
     def print_paths(paths, target_bytes):
