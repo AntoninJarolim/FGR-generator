@@ -3,3 +3,4 @@ data/
 .env
 .env_einfra
 notebooks/.ipynb_checkpoints
+examples/*
