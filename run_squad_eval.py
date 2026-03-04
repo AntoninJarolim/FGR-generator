@@ -5,6 +5,7 @@ from argparse import Namespace
 from typing import Any, Literal
 
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
+from utils.print_examples import print_evaluation_stats, get_examples_dir
 
 
 def evaluate(predictions, ground_truths_data_map):
@@ -51,17 +52,13 @@ def check_is_valid(record, start_token, end_token):
     return normalize_text(cleaned_output) == normalize_text(context)
 
 
-def get_valid_ids(ref_preds, reference_method: str, start_span_token, end_span_token) -> set[Any]:
-    # Check for validity in reference method
+def get_valid_ids(ref_preds, start_span_token, end_span_token) -> set[Any]:
+    """Check for validity using standard method."""
     valid_ids = set()
     for pred_id, pred_data in ref_preds.items():
         if check_is_valid(pred_data, start_span_token, end_span_token):
             valid_ids.add(pred_id)
 
-    cheating_count = len(ref_preds) - len(valid_ids)
-    print(f"Found {len(valid_ids)} valid IDs out of {len(ref_preds)} total in '{reference_method}'.")
-    if cheating_count > 0:
-        print(f"Excluded {cheating_count} cheating examples from comparison set.")
     return valid_ids
 
 
@@ -125,9 +122,6 @@ def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
     diff_pred_ids = set()
     for k in ids_to_inspect:
         assert not exact_match_score(standard_data[k]['prediction'], parallel_data[k]['prediction'])
-        print(f"ID{standard_data[k]['id']}")
-        print(f"Std pred: '{standard_data[k]['prediction']}'")
-        print(f"Prl pred: '{parallel_data[k]['prediction']}'", end="\n\n")
 
         # Get the index of the token starting <start> tag
         std_start = standard_data[k]['start']
@@ -149,9 +143,6 @@ def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
 
 
 def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_map):
-    print(f"\n\n{'=' * 20} Running Evaluation: {label} {'=' * 20}")
-    print(f"Evaluating on {len(target_ids)} IDs.")
-
     current_results_by_method = {}
 
     for method_name, data in methods_data.items():
@@ -162,7 +153,6 @@ def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_ma
 
 
 def run_evaluation_on_ids_one_method(data, method_name, ground_truths_data_map, target_ids) -> dict[Any, Any]:
-    print(f"\nEvaluating '{method_name}'...")
     predictions = data["results"]
 
     # Filter predictions to only those in target_ids
@@ -170,21 +160,7 @@ def run_evaluation_on_ids_one_method(data, method_name, ground_truths_data_map, 
                       if p_id in target_ids]
 
     # Get detailed results
-    detailed_results = evaluate(filtered_preds, ground_truths_data_map)
-
-    # Calculate and print averages
-    if not detailed_results:
-        avg_f1, avg_em = 0.0, 0.0
-    else:
-        total_f1 = sum(res['f1'] for res in detailed_results.values())
-        total_em = sum(res['em'] for res in detailed_results.values())
-        count = len(detailed_results)
-        avg_f1 = total_f1 / count
-        avg_em = total_em / count
-
-    print(f"  Average F1 Score: {avg_f1:.4f}")
-    print(f"  Average Exact Match Score: {avg_em:.4f}")
-    return detailed_results
+    return evaluate(filtered_preds, ground_truths_data_map)
 
 
 def main():
@@ -202,83 +178,19 @@ def main():
     methods_data = load_all_data(args, prediction_files)
 
     assert "standard" in methods_data
-    reference_method = "standard"
-    compare_method = args.compare_method
-    print(f"Using '{reference_method}' as the reference for valid IDs.")
+    other_methods = sorted(m for m in methods_data if m != "standard")
 
-    ref_data = methods_data[reference_method]
+    ref_data = methods_data["standard"]
     ref_preds = ref_data["results"]
     ref_params = ref_data["parameters"]
     start_span_token = ref_params["start_span_token"]
     end_span_token = ref_params["end_span_token"]
 
-    assert_coherent_params(methods_data, reference_method)
+    assert_coherent_params(methods_data)
 
-    # 2. Get the differences in the most prominent method and standard eval baseline
+    # 2. Run evaluation on ALL IDs and valid IDs (needed for per-method stats and examples)
     all_ids = set(ref_preds.keys())
-
-    # Filter examples with invalid generation using even standard method
-    valid_ids = get_valid_ids(ref_preds, reference_method, start_span_token, end_span_token)
-
-    # Find differences of context tokenization
-    diff_tokens_ids = get_diff_tokens_ids(
-        methods_data[reference_method],
-        methods_data[compare_method],
-        valid_ids
-    )
-
-    diff_texts_ids = get_diff_raw_outputs(
-        methods_data[reference_method],
-        methods_data[compare_method],
-        diff_tokens_ids
-    )
-
-    diff_prediction_ids = get_diff_prediction_span(
-        methods_data[reference_method],
-        methods_data[compare_method],
-        diff_texts_ids
-    )
-
-    diff_toks_bef_start = get_diff_toks_bef_start(
-        methods_data[reference_method],
-        methods_data[compare_method],
-        diff_prediction_ids
-    )
-
-    print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids, diff_toks_bef_start)
-
-    # Get score difference 'valid+same' vs 'valid+different' prediction
-    valid_same = valid_ids - diff_prediction_ids
-    run_evaluation_on_ids_one_method(
-        methods_data[compare_method],
-        f"{compare_method} on ids with identical predictions ({len(valid_same)} samples)",
-        ground_truths_data_map,
-        valid_same,
-    )
-
-    run_evaluation_on_ids_one_method(
-        methods_data[compare_method],
-        f"{compare_method} on ids with different predictions ({len(diff_prediction_ids)} samples)",
-        ground_truths_data_map,
-        diff_prediction_ids,
-    )
-
-    # Get score difference 'valid+same' vs 'valid+different' prediction
-    valid_same = valid_ids - diff_prediction_ids
-    run_evaluation_on_ids_one_method(
-        methods_data[compare_method],
-        f"{compare_method} on ids with identical prefix ({len(valid_same)} samples)",
-        ground_truths_data_map,
-        valid_same,
-    )
-
-    run_evaluation_on_ids_one_method(
-        methods_data[compare_method],
-        f"{compare_method} on ids with different prefix ({len(diff_prediction_ids)} samples)",
-        ground_truths_data_map,
-        diff_prediction_ids,
-    )
-
+    valid_ids = get_valid_ids(ref_preds, start_span_token, end_span_token)
 
     # 3. Run evaluation on ALL IDs (Incorrect Analysis)
     run_evaluation_on_ids(
@@ -295,92 +207,109 @@ def main():
         ground_truths_data_map
     )
 
-    # Comparison logic (using valid IDs results)
     results_by_method = results_by_method_valid
+    standard_results = results_by_method.get("standard") or {}
+    examples_dir = get_examples_dir(args.input_dir)
+    os.makedirs(examples_dir, exist_ok=True)
 
-    if not "standard" in results_by_method or not compare_method in results_by_method:
-        print(f"\nSkipping comparison: 'standard' and/or '{compare_method}' results not found.")
-        exit(0)
+    # Per-method: run hierarchy (standard vs this method), build stats and examples, store one file per method
+    for method_name in other_methods:
+        diff_tokens_ids = get_diff_tokens_ids(
+            methods_data["standard"],
+            methods_data[method_name],
+            valid_ids,
+        )
+        diff_texts_ids = get_diff_raw_outputs(
+            methods_data["standard"],
+            methods_data[method_name],
+            diff_tokens_ids,
+        )
+        diff_prediction_ids = get_diff_prediction_span(
+            methods_data["standard"],
+            methods_data[method_name],
+            diff_texts_ids,
+        )
+        diff_toks_bef_start = get_diff_toks_bef_start(
+            methods_data["standard"],
+            methods_data[method_name],
+            diff_prediction_ids,
+        )
+        common_keys = set(standard_results.keys()) & set((results_by_method.get(method_name) or {}).keys())
+        method_pair = ["standard", method_name]
+        results_subset = {k: results_by_method[k] for k in method_pair if k in results_by_method}
+        statistics = build_statistics(
+            all_ids, valid_ids, diff_tokens_ids, diff_texts_ids,
+            diff_prediction_ids, diff_toks_bef_start,
+            results_subset, common_keys, method_pair,
+        )
+        parallel_results = results_by_method.get(method_name) or {}
+        differences = []
+        for key in common_keys:
+            standard_f1 = standard_results[key]["f1"]
+            parallel_f1 = parallel_results[key]["f1"]
+            diff = abs(standard_f1 - parallel_f1)
+            if diff > 0:
+                gt_item = ground_truths_data_map.get(key)
+                differences.append({
+                    "diff": diff,
+                    "question": gt_item["question"],
+                    "context": gt_item["context"],
+                    "ground_truths": gt_item["answers"],
+                    "standard_f1": standard_f1,
+                    "parallel_f1": parallel_f1,
+                    "standard_pred": standard_results[key]["prediction"],
+                    "parallel_pred": parallel_results[key]["prediction"],
+                })
+        differences.sort(key=lambda x: x["diff"], reverse=True)
+        artifacts = {"statistics": statistics, "examples": differences}
+        out_path = os.path.join(examples_dir, f"eval_artifacts_{method_name}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(artifacts, f, indent=2, ensure_ascii=False)
+        print_evaluation_stats(statistics)
 
-    print("Printing some examples of differences only on non-cheating examples.")
-    standard_results = results_by_method["standard"]
-    parallel_results = results_by_method[compare_method]
 
-    differences = []
-    common_keys = set(standard_results.keys()).intersection(set(parallel_results.keys()))
-    print(f"Length of Common  (standard and {compare_method}): {len(common_keys)}")
-
-    for key in common_keys:
-        standard_f1 = standard_results[key]["f1"]
-        parallel_f1 = parallel_results[key]["f1"]
-        diff = abs(standard_f1 - parallel_f1)
-
-        if diff > 0:
-            gt_item = ground_truths_data_map.get(key)
-            question = gt_item["question"]
-            context = gt_item["context"]
-            ground_truths = gt_item["answers"]
-            differences.append({
-                "diff": diff,
-                "question": question,
-                "context": context,
-                "ground_truths": ground_truths,
-                "standard_f1": standard_f1,
-                "parallel_f1": parallel_f1,
-                "standard_pred": standard_results[key]["prediction"],
-                "parallel_pred": parallel_results[key]["prediction"],
-            })
-
-    differences.sort(key=lambda x: x["diff"], reverse=True)
-
-    print(f"\n\n--- Top 30 F1 Score Differences (standard vs. {compare_method}) ---")
-    for i, item in enumerate(differences[:30]):
-        print(f"\n--- Example {i + 1} (Diff: {item['diff']:.4f}) ---")
-        print(f"Question: {item['question']}")
-        print(f"Context: {item['context']}")
-        print(f"Ground Truth: {item['ground_truths']}")
-        print(f"  Standard F1: {item['standard_f1']:.4f}, Pred: '{item['standard_pred']}'")
-        print(f"  Parallel F1: {item['parallel_f1']:.4f}, Pred: '{item['parallel_pred']}'")
-
-
-def print_filtering_hierarchy(all_ids, valid_ids, diff_tokens_ids, diff_texts_ids, diff_prediction_ids, diff_toks_bef_start):
+def build_statistics(
+    all_ids, valid_ids, diff_tokens_ids, diff_texts_ids,
+    diff_prediction_ids, diff_toks_bef_start,
+    results_by_method, common_keys, method_names: list[str],
+) -> dict[str, Any]:
+    """Build a statistics dict for storage alongside examples."""
     n_all = len(all_ids)
     n_valid = len(valid_ids)
-    n_invalid = n_all - n_valid
-
     n_diff_tok = len(diff_tokens_ids)
-    n_same_tok = n_valid - n_diff_tok
-
     n_diff_text = len(diff_texts_ids)
-    n_same_text = n_diff_tok - n_diff_text
-
     n_diff_pred = len(diff_prediction_ids)
-    n_same_pred = n_diff_text - n_diff_pred
-
     n_diff_toks_bef = len(diff_toks_bef_start)
-    n_same_toks_bef = n_diff_pred - n_diff_toks_bef
-
-    def pct(n, total):
-        if total == 0: return "0.0%"
-        return f"({n / total * 100:.1f}%)"
-
-    print(f"ALL {n_all}")
-    print(f"-- invalid {n_invalid} {pct(n_invalid, n_all)}")
-    print(f"-- valid {n_valid} {pct(n_valid, n_all)}")
-    print(f"  -- same tokenization {n_same_tok} {pct(n_same_tok, n_valid)}")
-    print(f"  -- different tokenization {n_diff_tok} {pct(n_diff_tok, n_valid)}")
-    print(f"    -- same raw output {n_same_text} {pct(n_same_text, n_diff_tok)}")
-    print(f"    -- different raw output {n_diff_text} {pct(n_diff_text, n_diff_tok)}")
-    print(f"      -- same prediction {n_same_pred} {pct(n_same_pred, n_diff_text)}")
-    print(f"      -- different prediction {n_diff_pred} {pct(n_diff_pred, n_diff_text)}")
-    print(f"        -- same ctx tokens before start {n_same_toks_bef} {pct(n_same_toks_bef, n_diff_pred)}")
-    print(f"        -- different ctx tokens before start {n_diff_toks_bef} {pct(n_diff_toks_bef, n_diff_pred)}")
+    counts = {
+        "all": n_all,
+        "valid": n_valid,
+        "invalid": n_all - n_valid,
+        "same_tokenization": n_valid - n_diff_tok,
+        "different_tokenization": n_diff_tok,
+        "same_raw_output": n_diff_tok - n_diff_text,
+        "different_raw_output": n_diff_text,
+        "same_prediction": n_diff_text - n_diff_pred,
+        "different_prediction": n_diff_pred,
+        "same_ctx_tokens_before_start": n_diff_pred - n_diff_toks_bef,
+        "different_ctx_tokens_before_start": n_diff_toks_bef,
+        "common_keys_all_methods": len(common_keys),
+    }
+    averages = {}
+    for method_name, detailed in results_by_method.items():
+        if not detailed:
+            averages[method_name] = {"avg_f1": 0.0, "avg_em": 0.0}
+        else:
+            n = len(detailed)
+            averages[method_name] = {
+                "avg_f1": sum(r["f1"] for r in detailed.values()) / n,
+                "avg_em": sum(r["em"] for r in detailed.values()) / n,
+            }
+    return {"counts": counts, "averages": averages, "methods": method_names}
 
 
 def parse_args() -> Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SQuAD predictions.")
-    parser.add_argument("input_dir", help="Path to the directory with prediction files.")
-    parser.add_argument("--compare_method", default="parallel_multiple_diff", help="Method to compare against standard (default: parallel_multiple_diff)")
+    parser.add_argument("input_dir", help="Path to the directory with prediction files (all .json except gt.json are methods).")
     args = parser.parse_args()
     return args
 
@@ -393,12 +322,12 @@ def get_gt_data(args: Namespace) -> Any:
     return gt_data
 
 
-def assert_coherent_params(methods_data: dict[Any, Any], reference_method: str):
+def assert_coherent_params(methods_data: dict[Any, Any]) -> None:
     """
     Check that all the methods were generated using the same generation params.
     Invalid comparison would arise otherwise
     """
-    ref_params = methods_data[reference_method]["parameters"]
+    ref_params = methods_data["standard"]["parameters"]
 
     for method_name, data in methods_data.items():
         assert data["parameters"] == ref_params, (
@@ -417,11 +346,10 @@ def load_all_data(args: Namespace, prediction_files: list[str | Literal['gt.json
             with open(file_path, 'r', encoding='utf-8') as f:
                 data_loaded = json.load(f)
             methods_data[method_name] = data_loaded
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"\nAn error occurred while loading {filename}: {e}. Skipping.")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
 
     if not methods_data:
-        print("No valid method data loaded.")
         exit(1)
 
     for method_name, data in methods_data.items():
