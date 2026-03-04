@@ -62,84 +62,61 @@ def get_valid_ids(ref_preds, start_span_token, end_span_token) -> set[Any]:
     return valid_ids
 
 
+def _get_ids_where_differ(
+    standard_data: dict,
+    parallel_data: dict,
+    ids_to_inspect: set,
+    differ_fn: Any,
+) -> set:
+    """
+    Return set of keys in ids_to_inspect where differ_fn(std_results, prl_results, key) is True.
+    standard_data/parallel_data are full method dicts (with "results" key).
+    """
+    std_res = standard_data["results"]
+    prl_res = parallel_data["results"]
+    return {k for k in ids_to_inspect if differ_fn(std_res, prl_res, k)}
+
+
 def get_diff_tokens_ids(standard_data, parallel_data, valid_ids):
-    standard_data = standard_data["results"]
-    parallel_data = parallel_data["results"]
+    EOS_TOKEN_ID = 128009  # todo: eos_token_id
 
-    diff_tokens_ids = set()
-    for key in valid_ids:
-        std_ctx = standard_data[key]['ctx_enc']
-        prl_ctx = parallel_data[key]['ctx_enc']
-
-        if std_ctx[-1] == 128009:  # todo: eos_token_id:
+    def differ(std_res, prl_res, k):
+        std_ctx = list(std_res[k]["ctx_enc"])
+        if std_ctx and std_ctx[-1] == EOS_TOKEN_ID:
             std_ctx = std_ctx[:-1]
+        return std_ctx != prl_res[k]["ctx_enc"]
 
-        if std_ctx != prl_ctx:
-            diff_tokens_ids.add(key)
-
-    return diff_tokens_ids
+    return _get_ids_where_differ(standard_data, parallel_data, valid_ids, differ)
 
 
 def get_diff_raw_outputs(standard_data, parallel_data, ids_to_inspect):
     def white_space_fix(text):
-        return ' '.join(text.split())
+        return " ".join(text.split())
 
-    standard_data = standard_data["results"]
-    parallel_data = parallel_data["results"]
+    def differ(std_res, prl_res, k):
+        return white_space_fix(std_res[k]["raw_output"]) != white_space_fix(prl_res[k]["raw_output"])
 
-    diff_texts = set()
-    for k in ids_to_inspect:
-        std_ctx = standard_data[k]['raw_output']
-        prl_ctx = parallel_data[k]['raw_output']
-
-        if white_space_fix(std_ctx) != white_space_fix(prl_ctx):
-            diff_texts.add(k)
-
-    return diff_texts
+    return _get_ids_where_differ(standard_data, parallel_data, ids_to_inspect, differ)
 
 
 def get_diff_prediction_span(standard_data, parallel_data, ids_to_inspect):
-    standard_data = standard_data["results"]
-    parallel_data = parallel_data["results"]
+    def differ(std_res, prl_res, k):
+        return not exact_match_score(std_res[k]["prediction"], prl_res[k]["prediction"])
 
-    diff_pred_ids = set()
-    for k in ids_to_inspect:
-        std_ctx = standard_data[k]['prediction']
-        prl_ctx = parallel_data[k]['prediction']
-
-        if not exact_match_score(std_ctx, prl_ctx):
-            diff_pred_ids.add(k)
-
-    return diff_pred_ids
+    return _get_ids_where_differ(standard_data, parallel_data, ids_to_inspect, differ)
 
 
-# Helper function to run evaluation on a specific set of IDs
 def get_diff_toks_bef_start(standard_data, parallel_data, ids_to_inspect):
-    standard_data = standard_data["results"]
-    parallel_data = parallel_data["results"]
-
-
-    diff_pred_ids = set()
-    for k in ids_to_inspect:
-        assert not exact_match_score(standard_data[k]['prediction'], parallel_data[k]['prediction'])
-
-        # Get the index of the token starting <start> tag
-        std_start = standard_data[k]['start']
-        prl_start = parallel_data[k]['start']
-
+    def differ(std_res, prl_res, k):
+        assert not exact_match_score(std_res[k]["prediction"], prl_res[k]["prediction"])
+        std_start = std_res[k]["start"]
+        prl_start = prl_res[k]["start"]
         if not std_start or not prl_start:
-            continue
-
+            return False
         start_i = min(std_start, prl_start)
+        return std_res[k]["ctx_enc"][:start_i] != prl_res[k]["ctx_enc"][:start_i]
 
-        std_ctx_start = standard_data[k]['ctx_enc'][:start_i]
-        prl_ctx_start = parallel_data[k]['ctx_enc'][:start_i]
-
-        # finding different starts in the ctx - teacher forcing different tokens
-        if std_ctx_start != prl_ctx_start:
-            diff_pred_ids.add(k)
-
-    return diff_pred_ids
+    return _get_ids_where_differ(standard_data, parallel_data, ids_to_inspect, differ)
 
 
 def run_evaluation_on_ids(target_ids, label, methods_data, ground_truths_data_map):
