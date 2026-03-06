@@ -6,6 +6,27 @@ from typing import Any, Literal
 
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
 from utils.print_examples import print_evaluation_stats, get_examples_dir
+from utils.artifact_hash import artifact_hash
+from utils import wandb_integration
+
+
+def save_artifacts_if_new(
+    artifacts: dict,
+    out_path: str,
+) -> bool:
+    """If artifact content is new (by hash): save to out_path and register for wandb. Returns True if data was new."""
+    new_hash = artifact_hash(artifacts)
+    if os.path.isfile(out_path):
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            if artifact_hash(existing) == new_hash:
+                return False
+        except (OSError, json.JSONDecodeError):
+            pass
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(artifacts, f, indent=2, ensure_ascii=False)
+    return True
 
 
 def evaluate(predictions, ground_truths_data_map):
@@ -165,7 +186,7 @@ def main():
 
     assert_coherent_params(methods_data)
 
-    # 2. Run evaluation on ALL IDs and valid IDs (needed for per-method stats and examples)
+    # 2. Run evaluation on ALL IDs and valid IDs (needed for per-method stats)
     all_ids = set(ref_preds.keys())
     valid_ids = get_valid_ids(ref_preds, start_span_token, end_span_token)
 
@@ -189,7 +210,18 @@ def main():
     examples_dir = get_examples_dir(args.input_dir)
     os.makedirs(examples_dir, exist_ok=True)
 
-    # Per-method: run hierarchy (standard vs this method), build stats and examples, store one file per method
+    had_new_data = False
+
+    # 1. Standard first: compute once, store in separate file
+    statistics_standard = build_statistics_standard_only(all_ids, valid_ids, standard_results)
+    artifacts_standard = {"statistics": statistics_standard}
+    out_path_standard = os.path.join(examples_dir, "eval_artifacts_standard.json")
+    print_evaluation_stats(statistics_standard)
+    if save_artifacts_if_new(artifacts_standard, out_path_standard):
+        wandb_integration.register_for_log(args.input_dir, "standard", statistics_standard)
+        had_new_data = True
+
+    # 2. Other methods: reuse standard from memory, store only this method's stats
     for method_name in other_methods:
         diff_tokens_ids = get_diff_tokens_ids(
             methods_data["standard"],
@@ -214,35 +246,64 @@ def main():
         common_keys = set(standard_results.keys()) & set((results_by_method.get(method_name) or {}).keys())
         method_pair = ["standard", method_name]
         results_subset = {k: results_by_method[k] for k in method_pair if k in results_by_method}
-        statistics = build_statistics(
+        statistics_full = build_statistics(
             all_ids, valid_ids, diff_tokens_ids, diff_texts_ids,
             diff_prediction_ids, diff_toks_bef_start,
             results_subset, common_keys, method_pair,
         )
-        parallel_results = results_by_method.get(method_name) or {}
-        differences = []
-        for key in common_keys:
-            standard_f1 = standard_results[key]["f1"]
-            parallel_f1 = parallel_results[key]["f1"]
-            diff = abs(standard_f1 - parallel_f1)
-            if diff > 0:
-                gt_item = ground_truths_data_map.get(key)
-                differences.append({
-                    "diff": diff,
-                    "question": gt_item["question"],
-                    "context": gt_item["context"],
-                    "ground_truths": gt_item["answers"],
-                    "standard_f1": standard_f1,
-                    "parallel_f1": parallel_f1,
-                    "standard_pred": standard_results[key]["prediction"],
-                    "parallel_pred": parallel_results[key]["prediction"],
-                })
-        differences.sort(key=lambda x: x["diff"], reverse=True)
-        artifacts = {"statistics": statistics, "examples": differences}
+        # Store only this method's averages (standard is in its own file)
+        statistics_for_file = {
+            "counts": statistics_full["counts"],
+            "averages": {method_name: statistics_full["averages"][method_name]},
+        }
+
+        artifacts = {"statistics": statistics_for_file}
         out_path = os.path.join(examples_dir, f"eval_artifacts_{method_name}.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(artifacts, f, indent=2, ensure_ascii=False)
-        print_evaluation_stats(statistics)
+        print_evaluation_stats(statistics_full)
+
+        if save_artifacts_if_new(artifacts, out_path):
+            wandb_integration.register_for_log(args.input_dir, method_name, statistics_for_file)
+            had_new_data = True
+
+    if had_new_data:
+        wandb_integration.log_run(args.input_dir)
+    else:
+        print("No changes detected, no wandb logging.")
+
+
+def build_statistics_standard_only(
+    all_ids: set,
+    valid_ids: set,
+    standard_results: dict,
+) -> dict[str, Any]:
+    """Build statistics for the standard method only (no comparison). No diff hierarchy."""
+    n_all = len(all_ids)
+    n_valid = len(valid_ids)
+    counts = {
+        "all": n_all,
+        "valid": n_valid,
+        "invalid": n_all - n_valid,
+        "same_tokenization": n_valid,
+        "different_tokenization": 0,
+        "same_raw_output": n_valid,
+        "different_raw_output": 0,
+        "same_prediction": n_valid,
+        "different_prediction": 0,
+        "same_ctx_tokens_before_start": n_valid,
+        "different_ctx_tokens_before_start": 0,
+        "common_keys_all_methods": n_valid,
+    }
+    if not standard_results:
+        averages = {"standard": {"avg_f1": 0.0, "avg_em": 0.0}}
+    else:
+        n = len(standard_results)
+        averages = {
+            "standard": {
+                "avg_f1": sum(r["f1"] for r in standard_results.values()) / n,
+                "avg_em": sum(r["em"] for r in standard_results.values()) / n,
+            }
+        }
+    return {"counts": counts, "averages": averages}
 
 
 def build_statistics(
@@ -281,7 +342,7 @@ def build_statistics(
                 "avg_f1": sum(r["f1"] for r in detailed.values()) / n,
                 "avg_em": sum(r["em"] for r in detailed.values()) / n,
             }
-    return {"counts": counts, "averages": averages, "methods": method_names}
+    return {"counts": counts, "averages": averages}
 
 
 def parse_args() -> Namespace:

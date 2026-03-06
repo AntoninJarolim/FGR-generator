@@ -18,7 +18,6 @@ def print_evaluation_stats(statistics: dict) -> None:
     """Print evaluation statistics (counts hierarchy + averages). No examples."""
     counts = statistics["counts"]
     averages = statistics["averages"]
-    methods = statistics.get("methods", [])
 
     n_all = counts["all"]
     n_valid = counts["valid"]
@@ -38,8 +37,7 @@ def print_evaluation_stats(statistics: dict) -> None:
         return f"({n / total * 100:.1f}%)"
 
     print("--- Evaluation statistics ---")
-    print(f"Methods: {methods}")
-    print(f"Common keys (all methods): {counts.get('common_keys_all_methods', 'N/A')}")
+    print(f"Common keys: {counts.get('common_keys_all_methods', 'N/A')}")
     print()
     print("Filtering hierarchy:")
     print(f"ALL {n_all}")
