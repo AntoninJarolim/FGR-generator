@@ -65,6 +65,9 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
     greedy_next = torch.argmax(logits, dim=-1, keepdim=False).to("cpu")[..., newaxis]
     insert_tag_ids = torch.tensor(insert_token_ids)[newaxis, newaxis, :]
     in_generating = torch.eq(greedy_next, insert_tag_ids).any(dim=-1)
+    if not torch.any(in_generating):
+        return -1
+    # argmax selects FIRST true
     first_greater = torch.argmax(in_generating.type(torch.int), dim=-1).item()
 
     show_it = False
@@ -112,7 +115,7 @@ def append_tokens_batched(x, append_toks):
     return torch.cat(
         [
             x,
-            one_token.repeat(x.size(0), 1)
+            append_toks.to(x.device).repeat(x.size(0), 1)
         ],
         dim=1
     )
@@ -304,6 +307,13 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
     return results
 
 
+def argmax_logit_id(logits, next_valid):
+    mask = torch.full_like(logits, float("-inf"))
+    mask[:, :, next_valid] = logits[:, :, next_valid]
+    next_span_token_id = mask.argmax(dim=-1)
+    return next_span_token_id
+
+
 def generate_parallel_answers_tokens_only(model, data, template, start_span_token, end_span_token):
     start_span_str = start_span_token
     end_span_str = end_span_token
@@ -314,6 +324,9 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
 
     start_span_token_id = tokens_finder.get_single_token(start_span_str)
     end_span_token_id = tokens_finder.get_single_token(end_span_str)
+
+    start_id_next_valid_f = tokens_finder.get_valid_next_func(start_span_str)
+    end_id_next_valid_f = tokens_finder.get_valid_next_func(end_span_str)
 
     data = remove_special_tokens(data, end_span_str, start_span_str)
 
@@ -339,29 +352,66 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
             gt_range=gt_span_pos
         )
 
-        before = append_one_token_batched(ctx_enc[:, :start], start_span_token_id)
-        tmp_after = ctx_enc[:, start:]
+        # Last position selected or nothing selected
+        selected_end = (start == ctx_enc.size(1)) or (start == -1)
 
-        logits, ctx_enc = model.encode_ctx(prompt, context=tmp_after, before=before)
-        end = lowest_index_greater_zero(
-            logits,
-            end_span_tokens_id,
-            plot_label="End", gt_range=gt_span_pos, start_index=start
-        )
+        if selected_end:
+            answer = ""
+            annotated = context + start_span_str + end_span_str
+            annotated_tokens = ctx_enc[0].tolist()
+            end = start + 1
+        else:
+            start_span_token_id = logits[:, start].argmax()
+            before = append_tokens_batched(ctx_enc[:, :start], start_span_token_id)
+            while True:
+                next_valid = start_id_next_valid_f(before[0])
+                if not next_valid:
+                    # next_valid returns empty set if the target string is generated
+                    break
+                if len(next_valid) == 1:
+                    # No need to perform forward, if only one token allowed
+                    before = append_tokens_batched(before, next_valid)
+                else:
+                    # Required to make forward to distinguish what to generate
+                    logits, _ = model.encode_ctx(prompt, context=None, before=before)
+                    next_span_token_id = argmax_logit_id(logits, next_valid)
+                    before = append_tokens_batched(before, next_span_token_id)
 
-        middle = ctx_enc[:, :end]
-        after = ctx_enc[:, end:]
+            assert "�" not in model.tokenizer.decode(ctx_enc[:, start:][0])
 
-        annotated_tokens = torch.cat([
-                before,
-                append_one_token_batched(middle, end_span_token_id),
-                after
-            ],
-            dim=1
-        )[0].tolist()
 
-        annotated = model.tokenizer.decode(annotated_tokens)
-        answer = model.tokenizer.decode(middle[0])
+            # <start> tag is generated at this point; now catch back with middle
+            first_middle = ctx_enc[:, start].item()
+            next_valid = tokens_finder.get_generating_tokens(first_middle)
+
+            logits, _ = model.encode_ctx(prompt, context=None, before=before)
+            catch_tok = argmax_logit_id(logits, next_valid)
+            before = append_tokens_batched(before, catch_tok)
+
+            tmp_after = model.tokenizer.decode(ctx_enc[:, start:][0]).lstrip()
+            tmp_after_catch = tmp_after.removeprefix(model.tokenizer.decode(catch_tok[0]))
+
+            logits, ctx_enc = model.encode_ctx(prompt, context=tmp_after_catch, before=before)
+            end = lowest_index_greater_zero(
+                logits,
+                end_span_tokens_id,
+                plot_label="End", gt_range=gt_span_pos, start_index=start
+            )
+
+            # Note that middle is missing catch_tok at the start, but it's okay cuz last 'before' contains it
+            middle = ctx_enc[:, :end]
+            after = ctx_enc[:, end:]
+
+            annotated_tokens = torch.cat([
+                    before,
+                    append_tokens_batched(middle, end_span_token_id),
+                    after
+                ],
+                dim=1
+            )[0].tolist()
+
+            annotated = model.tokenizer.decode(annotated_tokens)
+            answer = extract_span(start_span_str, end_span_str, annotated)
 
         # print_topk_logits_decoded(
         #     tokens_finder,

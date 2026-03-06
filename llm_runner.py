@@ -133,12 +133,17 @@ class LLMRunner:
         else:
             ctx_enc = context
 
-        concat = [tmpl_enc, ctx_enc] if before is None else [tmpl_enc, before, ctx_enc]
+        concat = [tmpl_enc]
+        if before is not None:
+            concat.append(before)
+        if ctx_enc is not None:
+            concat.append(ctx_enc)
+
         input_ids = torch.cat(concat, dim=1).to(self.device)
 
         logits = self.model(input_ids=input_ids)['logits']
 
-        context_len = ctx_enc.size(1)
+        context_len = ctx_enc.size(1) if ctx_enc is not None else 0
         logits_ctx = logits[:, -context_len - 1:]
         return logits_ctx, ctx_enc
 
