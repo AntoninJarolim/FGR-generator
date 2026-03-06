@@ -32,6 +32,8 @@ def print_evaluation_stats(statistics: dict) -> None:
     n_same_toks_bef = counts["same_ctx_tokens_before_start"]
 
     def pct(n: int, total: int) -> str:
+        if n is None:
+            return ""
         if total == 0:
             return "0.0%"
         return f"({n / total * 100:.1f}%)"
