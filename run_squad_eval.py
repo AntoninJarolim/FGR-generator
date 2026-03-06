@@ -233,6 +233,11 @@ def main():
     # Phase 2b: Each other method — comparison counts vs standard, plus that method's averages
     standard_results = results_by_method.get("standard") or {}
     for method_name in other_methods:
+        valid_ids_this_method = get_valid_ids(
+            methods_data[method_name]["results"],
+            start_span_token,
+            end_span_token,
+        )
         diff_tokens_ids = get_diff_tokens_ids(
             methods_data["standard"],
             methods_data[method_name],
@@ -261,6 +266,7 @@ def main():
             diff_texts_ids,
             diff_prediction_ids,
             diff_toks_bef_start,
+            valid_ids_this_method,
             n_common=len(common_keys),
         )
         statistics_for_file = {
@@ -319,11 +325,13 @@ def compute_counts_vs_standard(
     diff_texts_ids: set,
     diff_prediction_ids: set,
     diff_toks_bef_start: set,
+    valid_this_method: set,
     n_common: int | None = None,
 ) -> dict[str, Any]:
-    """Counts for one method vs standard (hierarchy of diffs)."""
+    """Counts for one method vs standard. diff_* use standard's valid set; valid/invalid are for this method."""
     n_all = len(all_ids)
-    n_valid = len(valid_ids)
+    n_valid_standard = len(valid_ids)
+    n_valid = len(valid_this_method)
     n_diff_tok = len(diff_tokens_ids)
     n_diff_text = len(diff_texts_ids)
     n_diff_pred = len(diff_prediction_ids)
@@ -332,7 +340,7 @@ def compute_counts_vs_standard(
         "all": n_all,
         "valid": n_valid,
         "invalid": n_all - n_valid,
-        "same_tokenization": n_valid - n_diff_tok,
+        "same_tokenization": n_valid_standard - n_diff_tok,
         "different_tokenization": n_diff_tok,
         "same_raw_output": n_diff_tok - n_diff_text,
         "different_raw_output": n_diff_text,
@@ -340,7 +348,7 @@ def compute_counts_vs_standard(
         "different_prediction": n_diff_pred,
         "same_ctx_tokens_before_start": n_diff_pred - n_diff_toks_bef,
         "different_ctx_tokens_before_start": n_diff_toks_bef,
-        "common_keys_all_methods": n_common if n_common is not None else n_valid,
+        "common_keys_all_methods": n_common if n_common is not None else n_valid_standard,
     }
 
 
