@@ -271,8 +271,8 @@ def main():
         out_path = os.path.join(examples_dir, f"eval_artifacts_{method_name}.json")
         print_evaluation_stats(statistics_for_file)
 
+        wandb_integration.register_for_log(args.input_dir, method_name, statistics_for_file)
         if save_artifacts_if_new(artifacts, out_path):
-            wandb_integration.register_for_log(args.input_dir, method_name, statistics_for_file)
             had_new_data = True
 
     if had_new_data:
