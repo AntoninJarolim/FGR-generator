@@ -4,3 +4,5 @@ transformers
 jsonlines
 openai
 Jinja2
+triton
+wandb
