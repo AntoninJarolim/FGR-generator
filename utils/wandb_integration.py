@@ -38,14 +38,21 @@ def register_for_log(
     )
 
 
+# Columns for the comparison hierarchy: we log only "different_*" (same = parent - different).
+_DIFF_COUNT_KEYS = [
+    "different_tokenization",
+    "different_raw_output",
+    "different_prediction",
+    "different_ctx_tokens_before_start",
+]
+
+
 def _build_comparison_table(pending_list: list[PendingEntry]) -> Any:
-    """Build a wandb Table: one row per method. Standard is first; each entry has one method."""
+    """Build a wandb Table: one row per method with metrics and full diff hierarchy (only different_* logged)."""
     if wandb is None:
         return None
 
-    # Caller registers standard first, then others. Each entry has exactly one method in statistics.
     by_method: dict[str, dict] = {}
-    n_valid: int | None = None
     for entry in pending_list:
         avgs = entry.statistics.get("averages") or {}
         counts = entry.statistics.get("counts") or {}
@@ -54,11 +61,12 @@ def _build_comparison_table(pending_list: list[PendingEntry]) -> Any:
             by_method[method] = {
                 "avg_f1": avgs[method]["avg_f1"],
                 "avg_em": avgs[method]["avg_em"],
+                "all": counts.get("all"),
+                "invalid": counts.get("invalid"),
+                "valid": counts.get("valid"),
             }
-        if entry.method_name == "standard" and "valid" in counts:
-            n_valid = counts["valid"]
-        elif entry.method_name != "standard":
-            by_method.setdefault(method, {})["n_diff_pred"] = counts.get("different_prediction")
+            for key in _DIFF_COUNT_KEYS:
+                by_method[method][key] = counts.get(key)
 
     methods_ordered = ["standard"] + sorted(by_method.keys() - {"standard"})
 
@@ -67,28 +75,34 @@ def _build_comparison_table(pending_list: list[PendingEntry]) -> Any:
             return "-"
         return f"{v:.4f}" if fmt == "f4" else str(v)
 
+    columns = [
+        "method",
+        "avg_f1",
+        "avg_em",
+        "all",
+        "invalid",
+        "valid",
+        "diff_tokenization",
+        "diff_raw_output",
+        "diff_prediction",
+        "diff_ctx_tokens_before_start",
+    ]
     rows = []
     for method in methods_ordered:
         m = by_method.get(method, {})
-        n_diff_pred = "-" if method == "standard" else m.get("n_diff_pred")
-        rows.append([
+        row = [
             method,
             _cell(m.get("avg_f1"), "f4"),
             _cell(m.get("avg_em"), "f4"),
-            _cell(n_valid),
-            _cell(n_diff_pred),
-        ])
+            _cell(m.get("all")),
+            _cell(m.get("invalid")),
+            _cell(m.get("valid")),
+        ]
+        for key in _DIFF_COUNT_KEYS:
+            row.append(_cell(m.get(key)))
+        rows.append(row)
 
-    return wandb.Table(
-        columns=[
-            "method",
-            "avg_f1",
-            "avg_em",
-            "n_valid",
-            "n_different_prediction_vs_standard",
-        ],
-        data=rows,
-    )
+    return wandb.Table(columns=columns, data=rows)
 
 
 def _get_run_id_by_name(project: str, name: str) -> str | None:
@@ -140,3 +154,5 @@ def log_run(input_dir: str, project: str = "fgr-eval") -> None:
     table = _build_comparison_table(pending_list)
     if table is not None:
         wandb.log({"eval/comparison_table": table})
+
+    wandb.finish()
