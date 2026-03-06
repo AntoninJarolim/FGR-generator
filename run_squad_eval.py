@@ -206,22 +206,32 @@ def main():
     )
 
     results_by_method = results_by_method_valid
-    standard_results = results_by_method.get("standard") or {}
     examples_dir = get_examples_dir(args.input_dir)
     os.makedirs(examples_dir, exist_ok=True)
 
-    had_new_data = False
+    # Phase 1: Compute avg_f1 and avg_em for every method (no comparison yet)
+    method_averages = {
+        method_name: compute_method_averages(results_by_method.get(method_name) or {})
+        for method_name in methods_data
+    }
 
-    # 1. Standard first: compute once, store in separate file
-    statistics_standard = build_statistics_standard_only(all_ids, valid_ids, standard_results)
+    # Phase 2a: Standard — counts only (no comparison), plus its averages
+    counts_standard = compute_counts_standard_only(all_ids, valid_ids)
+    statistics_standard = {
+        "counts": counts_standard,
+        "averages": {"standard": method_averages["standard"]},
+    }
     artifacts_standard = {"statistics": statistics_standard}
     out_path_standard = os.path.join(examples_dir, "eval_artifacts_standard.json")
     print_evaluation_stats(statistics_standard)
+
+    had_new_data = False
     if save_artifacts_if_new(artifacts_standard, out_path_standard):
         wandb_integration.register_for_log(args.input_dir, "standard", statistics_standard)
         had_new_data = True
 
-    # 2. Other methods: reuse standard from memory, store only this method's stats
+    # Phase 2b: Each other method — comparison counts vs standard, plus that method's averages
+    standard_results = results_by_method.get("standard") or {}
     for method_name in other_methods:
         diff_tokens_ids = get_diff_tokens_ids(
             methods_data["standard"],
@@ -244,22 +254,22 @@ def main():
             diff_prediction_ids,
         )
         common_keys = set(standard_results.keys()) & set((results_by_method.get(method_name) or {}).keys())
-        method_pair = ["standard", method_name]
-        results_subset = {k: results_by_method[k] for k in method_pair if k in results_by_method}
-        statistics_full = build_statistics(
-            all_ids, valid_ids, diff_tokens_ids, diff_texts_ids,
-            diff_prediction_ids, diff_toks_bef_start,
-            results_subset, common_keys, method_pair,
+        counts = compute_counts_vs_standard(
+            all_ids,
+            valid_ids,
+            diff_tokens_ids,
+            diff_texts_ids,
+            diff_prediction_ids,
+            diff_toks_bef_start,
+            n_common=len(common_keys),
         )
-        # Store only this method's averages (standard is in its own file)
         statistics_for_file = {
-            "counts": statistics_full["counts"],
-            "averages": {method_name: statistics_full["averages"][method_name]},
+            "counts": counts,
+            "averages": {method_name: method_averages[method_name]},
         }
-
         artifacts = {"statistics": statistics_for_file}
         out_path = os.path.join(examples_dir, f"eval_artifacts_{method_name}.json")
-        print_evaluation_stats(statistics_full)
+        print_evaluation_stats(statistics_for_file)
 
         if save_artifacts_if_new(artifacts, out_path):
             wandb_integration.register_for_log(args.input_dir, method_name, statistics_for_file)
@@ -271,54 +281,54 @@ def main():
         print("No changes detected, no wandb logging.")
 
 
-def build_statistics_standard_only(
-    all_ids: set,
-    valid_ids: set,
-    standard_results: dict,
-) -> dict[str, Any]:
-    """Build statistics for the standard method only (no comparison). No diff hierarchy."""
+def compute_method_averages(results: dict) -> dict[str, float]:
+    """Compute avg_f1 and avg_em for one method from its id->{f1, em, ...} results."""
+    if not results:
+        return {"avg_f1": 0.0, "avg_em": 0.0}
+    n = len(results)
+    return {
+        "avg_f1": sum(r["f1"] for r in results.values()) / n,
+        "avg_em": sum(r["em"] for r in results.values()) / n,
+    }
+
+
+def compute_counts_standard_only(all_ids: set, valid_ids: set) -> dict[str, Any]:
+    """Counts for standard method only (no comparison): valid/invalid and trivial same_* = n_valid, different_* = 0."""
     n_all = len(all_ids)
     n_valid = len(valid_ids)
-    counts = {
+    return {
         "all": n_all,
         "valid": n_valid,
         "invalid": n_all - n_valid,
-        "same_tokenization": n_valid,
-        "different_tokenization": 0,
-        "same_raw_output": n_valid,
-        "different_raw_output": 0,
-        "same_prediction": n_valid,
-        "different_prediction": 0,
-        "same_ctx_tokens_before_start": n_valid,
-        "different_ctx_tokens_before_start": 0,
-        "common_keys_all_methods": n_valid,
+        "same_tokenization": None,
+        "different_tokenization": None,
+        "same_raw_output": None,
+        "different_raw_output": None,
+        "same_prediction": None,
+        "different_prediction": None,
+        "same_ctx_tokens_before_start": None,
+        "different_ctx_tokens_before_start": None,
+        "common_keys_all_methods": None,
     }
-    if not standard_results:
-        averages = {"standard": {"avg_f1": 0.0, "avg_em": 0.0}}
-    else:
-        n = len(standard_results)
-        averages = {
-            "standard": {
-                "avg_f1": sum(r["f1"] for r in standard_results.values()) / n,
-                "avg_em": sum(r["em"] for r in standard_results.values()) / n,
-            }
-        }
-    return {"counts": counts, "averages": averages}
 
 
-def build_statistics(
-    all_ids, valid_ids, diff_tokens_ids, diff_texts_ids,
-    diff_prediction_ids, diff_toks_bef_start,
-    results_by_method, common_keys, method_names: list[str],
+def compute_counts_vs_standard(
+    all_ids: set,
+    valid_ids: set,
+    diff_tokens_ids: set,
+    diff_texts_ids: set,
+    diff_prediction_ids: set,
+    diff_toks_bef_start: set,
+    n_common: int | None = None,
 ) -> dict[str, Any]:
-    """Build a statistics dict for storage alongside examples."""
+    """Counts for one method vs standard (hierarchy of diffs)."""
     n_all = len(all_ids)
     n_valid = len(valid_ids)
     n_diff_tok = len(diff_tokens_ids)
     n_diff_text = len(diff_texts_ids)
     n_diff_pred = len(diff_prediction_ids)
     n_diff_toks_bef = len(diff_toks_bef_start)
-    counts = {
+    return {
         "all": n_all,
         "valid": n_valid,
         "invalid": n_all - n_valid,
@@ -330,19 +340,8 @@ def build_statistics(
         "different_prediction": n_diff_pred,
         "same_ctx_tokens_before_start": n_diff_pred - n_diff_toks_bef,
         "different_ctx_tokens_before_start": n_diff_toks_bef,
-        "common_keys_all_methods": len(common_keys),
+        "common_keys_all_methods": n_common if n_common is not None else n_valid,
     }
-    averages = {}
-    for method_name, detailed in results_by_method.items():
-        if not detailed:
-            averages[method_name] = {"avg_f1": 0.0, "avg_em": 0.0}
-        else:
-            n = len(detailed)
-            averages[method_name] = {
-                "avg_f1": sum(r["f1"] for r in detailed.values()) / n,
-                "avg_em": sum(r["em"] for r in detailed.values()) / n,
-            }
-    return {"counts": counts, "averages": averages}
 
 
 def parse_args() -> Namespace:
