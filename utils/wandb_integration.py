@@ -1,10 +1,10 @@
 """
 Wandb integration for eval: register stats and log one comparison Table per run.
 No file I/O or hashing here; caller decides when data is new and calls register_for_log.
-Runs are keyed by name: same name resumes the same run so new plots are added instead of creating duplicates.
+Always appends to the same run by name: we look up via the API if a run with that name
+exists; if yes we resume by id and log, otherwise we create a new run (wandb assigns id).
 """
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,17 +91,28 @@ def _build_comparison_table(pending_list: list[PendingEntry]) -> Any:
     )
 
 
-def _run_id_from_name(name: str) -> str:
-    """Stable run id from run name so the same name always maps to the same run (for resume)."""
-    return hashlib.sha256(name.encode()).hexdigest()[:16]
+def _get_run_id_by_name(project: str, name: str) -> str | None:
+    """Return the id of the first run in the project with the given name, or None if not found."""
+    if wandb is None:
+        return None
+    try:
+        api = getattr(wandb, "Api", lambda: None)()
+        if api is None:
+            return None
+        for run in api.runs(project, per_page=500):
+            if getattr(run, "name", None) == name:
+                return getattr(run, "id", None)
+        return None
+    except Exception:
+        return None
 
 
 def log_run(input_dir: str, project: str = "fgr-eval") -> None:
     """
     If any method was registered for this input_dir: init wandb and log one comparison Table.
     Call once at the end of evaluation.
-    Uses run name as identifier: same input_dir resumes the same run so new tables/plots are added
-    instead of creating multiple runs with the same name.
+    Looks up a run by name; if found we resume by its id and append, else we create a new run
+    (no id passed so wandb assigns its own).
     """
     normalized = input_dir.removeprefix("data/").lstrip("/") or "eval"
     pending_list = _pending.pop(normalized, None)
@@ -110,14 +121,22 @@ def log_run(input_dir: str, project: str = "fgr-eval") -> None:
     if wandb is None:
         return
 
-    run_id = _run_id_from_name(normalized)
-    wandb.init(
-        project=project,
-        id=run_id,
-        name=normalized,
-        resume="allow",
-        config={"input_dir": input_dir},
-    )
+    existing_id = _get_run_id_by_name(project, normalized)
+
+    if existing_id is not None:
+        wandb.init(
+            project=project,
+            id=existing_id,
+            name=normalized,
+            resume="allow",
+            config={"input_dir": input_dir},
+        )
+    else:
+        wandb.init(
+            project=project,
+            name=normalized,
+            config={"input_dir": input_dir},
+        )
     table = _build_comparison_table(pending_list)
     if table is not None:
         wandb.log({"eval/comparison_table": table})
