@@ -181,8 +181,17 @@ def main():
     ref_data = methods_data["standard"]
     ref_preds = ref_data["results"]
     ref_params = ref_data["parameters"]
-    start_span_token = ref_params["start_span_token"]
-    end_span_token = ref_params["end_span_token"]
+    # Support both list (start_span_tokens) and single (start_span_token) for backward compatibility
+    start_span_token = (
+        ref_params["start_span_tokens"][0]
+        if "start_span_tokens" in ref_params
+        else ref_params["start_span_token"]
+    )
+    end_span_token = (
+        ref_params["end_span_tokens"][0]
+        if "end_span_tokens" in ref_params
+        else ref_params["end_span_token"]
+    )
 
     assert_coherent_params(methods_data)
 

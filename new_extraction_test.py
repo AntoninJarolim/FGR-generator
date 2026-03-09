@@ -16,8 +16,8 @@ from utils.other import TimedList
 
 
 def create_prompt(template, **kwargs):
-    start_span_token = kwargs.get("start_span_token")
-    end_span_token = kwargs.get("end_span_token")
+    start_span_tokens = kwargs.pop("start_span_tokens")
+    end_span_tokens = kwargs.pop("end_span_tokens")
 
     if type(template) == str:
         text_to_check = template
@@ -26,21 +26,29 @@ def create_prompt(template, **kwargs):
     else:
         raise TypeError("Template must be str or Template")
 
-    remove_special_token(text_to_check, start_span_token, end_span_token, error_on_detection=True)
+    # Remove all special tokens
+    remove_special_token(text_to_check, *start_span_tokens, *end_span_tokens, error_on_detection=True)
+
+    # Add all examples to the kwargs template
+    for i, (start_t, end_t) in enumerate(zip(start_span_tokens, end_span_tokens)):
+        suffix = "" if i == 0 else f"_{i}"
+        kwargs[f"start_span_token{suffix}"] = start_t
+        kwargs[f"end_span_token{suffix}"] = end_t
     return template.render(**kwargs)
 
 
-def remove_special_tokens(data, end_span_token, start_span_token):
+def remove_special_tokens(data, start_span_tokens, end_span_tokens):
     data_removed_special = []
+    all_tokens = [*start_span_tokens, *end_span_tokens]
     for record in tqdm.tqdm(data, desc="Preprocessing data"):
         data_removed_special.append(
             {
-                "question": remove_special_token(record["question"], start_span_token, end_span_token),
+                "question": remove_special_token(record["question"], *all_tokens),
                 "answer": [
-                    remove_special_token(a, start_span_token, end_span_token)
+                    remove_special_token(a, *all_tokens)
                     for a in record["answer"]
                 ],
-                "context": remove_special_token(record["context"], start_span_token, end_span_token),
+                "context": remove_special_token(record["context"], *all_tokens),
                 "id": record["id"]
             }
         )
@@ -125,7 +133,13 @@ def append_tokens_batched(x, append_toks):
 # -----------------------------
 
 
-def generate_standard_answers(model, data, start_span_token, end_span_token, template):
+def generate_standard_answers(model, data, start_span_tokens, end_span_tokens, template):
+    assert len(start_span_tokens) == 1 and len(end_span_tokens) == 1, (
+        "generate_standard_answers supports at most one tag pair"
+    )
+    start_span_token = start_span_tokens[0]
+    end_span_token = end_span_tokens[0]
+
     results = TimedList()
 
     tokens_finder = TokenByteFinder(model.tokenizer)
@@ -135,8 +149,8 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
     for record in tqdm.tqdm(data, desc="Standard generation"):
         prompt = create_prompt(
             template,
-            start_span_token=start_span_token,
-            end_span_token=end_span_token,
+            start_span_tokens=[start_span_token],
+            end_span_tokens=[end_span_token],
             question=record["question"],
             context=record["context"]
         )
@@ -187,9 +201,15 @@ def generate_standard_answers(model, data, start_span_token, end_span_token, tem
     return results
 
 
-def generate_parallel_answers(model, data, template, start_span_token, end_span_token, one_char=True):
-    start_span_str = start_span_token
-    end_span_str = end_span_token
+def generate_parallel_answers(model, data, template, start_span_tokens, end_span_tokens, one_char=True):
+    assert len(start_span_tokens) == 1 and len(end_span_tokens) == 1, (
+        "generate_parallel_answers supports at most one tag pair"
+    )
+    end_span_token = end_span_tokens[0]
+    start_span_token = start_span_tokens[0]
+
+    start_span_str = start_span_token[0]
+    end_span_str = end_span_token[0]
 
     results = TimedList()
 
@@ -201,7 +221,7 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
         start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
         end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
 
-    data = remove_special_tokens(data, end_span_str, start_span_str)
+    data = remove_special_tokens(data, start_span_token, end_span_token)
 
     for record in tqdm.tqdm(data, desc="Parallel generation"):
         context = record['context']
@@ -209,8 +229,8 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
 
         prompt = create_prompt(
             template,
-            start_span_token=start_span_str,
-            end_span_token=end_span_str,
+            start_span_tokens=start_span_token,
+            end_span_tokens=end_span_token,
             question=question,
             context=context
         )
@@ -245,15 +265,21 @@ def generate_parallel_answers(model, data, template, start_span_token, end_span_
     return results
 
 
-def generate_parallel_answers_diff(model, data, template, start_span_token, end_span_token):
-    start_span_str = start_span_token
-    end_span_str = end_span_token
+def generate_parallel_answers_diff(model, data, template, start_span_tokens, end_span_tokens):
+    assert len(start_span_tokens) == 1 and len(end_span_tokens) == 1, (
+        "generate_parallel_answers_diff supports at most one tag pair"
+    )
+    end_span_token = end_span_tokens[0]
+    start_span_token = start_span_tokens[0]
+
+    start_span_str = start_span_token[0]
+    end_span_str = end_span_token[0]
 
     tokens_finder = TokenByteFinder(model.tokenizer)
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
     end_span_tokens_id = tokens_finder.get_generating_tokens(end_span_str)
 
-    data = remove_special_tokens(data, end_span_str, start_span_str)
+    data = remove_special_tokens(data, start_span_token, end_span_token)
 
     results = TimedList()
     for record in tqdm.tqdm(data, desc="Parallel diff generation"):
@@ -263,8 +289,8 @@ def generate_parallel_answers_diff(model, data, template, start_span_token, end_
 
         prompt = create_prompt(
             template,
-            start_span_token=start_span_str,
-            end_span_token=end_span_str,
+            start_span_tokens=start_span_token,
+            end_span_tokens=end_span_token,
             question=question,
             context=context
         )
@@ -314,9 +340,15 @@ def argmax_logit_id(logits, next_valid):
     return next_span_token_id
 
 
-def generate_parallel_answers_tokens_only(model, data, template, start_span_token, end_span_token):
-    start_span_str = start_span_token
-    end_span_str = end_span_token
+def generate_parallel_answers_tokens_only(model, data, template, start_span_tokens, end_span_tokens):
+    assert len(start_span_tokens) == 1 and len(end_span_tokens) == 1, (
+        "generate_parallel_answers_tokens_only supports at most one tag pair"
+    )
+    end_span_token = end_span_tokens[0]
+    start_span_token = start_span_tokens[0]
+
+    start_span_str = start_span_token[0]
+    end_span_str = end_span_token[0]
 
     tokens_finder = TokenByteFinder(model.tokenizer)
     start_span_tokens_id = tokens_finder.get_generating_tokens(start_span_str)
@@ -328,7 +360,7 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
     start_id_next_valid_f = tokens_finder.get_valid_next_func(start_span_str)
     end_id_next_valid_f = tokens_finder.get_valid_next_func(end_span_str)
 
-    data = remove_special_tokens(data, end_span_str, start_span_str)
+    data = remove_special_tokens(data, start_span_token, end_span_token)
 
     results = TimedList()
     for record in tqdm.tqdm(data, desc="Parallel diff generation"):
@@ -338,8 +370,8 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
 
         prompt = create_prompt(
             template,
-            start_span_token=start_span_str,
-            end_span_token=end_span_str,
+            start_span_tokens=start_span_token,
+            end_span_tokens=end_span_token,
             question=question,
             context=context
         )
@@ -441,8 +473,10 @@ def parse_args():
                         help="Maximum dataset size to process.")
 
     parser.add_argument("--model", type=str, default="google/gemma-7b-it", help="HF model id to use.")
-    parser.add_argument("--start_span_token", type=str, default="⟦", help="Start span token.")
-    parser.add_argument("--end_span_token", type=str, default="⟧", help="End span token.")
+    parser.add_argument("--start_span_tokens", type=str, nargs="*", default=["⟦"],
+                        help="List of opening (start) span tokens. Default: ⟦")
+    parser.add_argument("--end_span_tokens", type=str, nargs="*", default=["⟧"],
+                        help="List of closing (end) span tokens. Default: ⟧")
 
     parser.add_argument("--extracted_data_path", type=str, required=True,
                         help="Path to the directory to save extracted data.")
@@ -453,7 +487,14 @@ def parse_args():
                                  'all'],
                         default='all',
                         help="Which method to run and save.")
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    # Opening and closing tags lists must have same len
+    assert len(args.end_span_tokens) == len(args.start_span_tokens), \
+        f"Invalid arguments: {args.end_span_tokens} does not match {args.start_span_tokens} length"
+
+    return args
 
 
 def safe_run_generation(method_name, generation_func, **kwargs):
@@ -482,8 +523,8 @@ def run_and_save_results(method_name, generation_func, output_dir, **kwargs):
 
     output_data = {
         "parameters": {
-            "start_span_token": kwargs.get("start_span_token"),
-            "end_span_token": kwargs.get("end_span_token"),
+            "start_span_tokens": kwargs.get("start_span_tokens"),
+            "end_span_tokens": kwargs.get("end_span_tokens"),
             "tokenizer": tokenizer_info,
             "generation_config": gen_config,
         },
@@ -527,8 +568,8 @@ def main():
         "model": model,
         "data": data,
         "template": template,
-        "start_span_token": args.start_span_token,
-        "end_span_token": args.end_span_token,
+        "start_span_tokens": args.start_span_tokens,
+        "end_span_tokens": args.end_span_tokens,
     }
 
     for method_name in generation_methods:
