@@ -147,6 +147,23 @@ class LLMRunner:
         logits_ctx = logits[:, -context_len - 1:]
         return logits_ctx, ctx_enc
 
+
+    def encode_ctx_verify(self, prefix, force_tokens, verify_tokens=None):
+
+        concat = [prefix]
+        if verify_tokens is not None:
+            concat.append(verify_tokens)
+        if force_tokens is not None:
+            concat.append(force_tokens)
+
+        input_ids = torch.cat(concat, dim=1).to(self.device)
+        logits = self.model(input_ids=input_ids)['logits']
+
+        prefix_size = prefix.size(1)
+        logits_ctx = logits[:, prefix_size - 1:]
+        return logits_ctx
+
+
     def append_eos_token_id(self, tokens):
         eos_id = self.tokenizer.eos_token_id
         eos = torch.tensor([[eos_id]], device=tokens.device)

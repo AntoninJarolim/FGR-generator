@@ -1,12 +1,16 @@
+import copy
 import functools
 import argparse
 import os.path
 import time
+from symtable import Class
+
 import torch
 import json
 import tqdm
 from jinja2 import Template
-from torch import newaxis
+from sympy import true
+from torch import newaxis, Tensor
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner, get_model_config
 from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
@@ -66,8 +70,14 @@ def find_max_pos(logits, insert_token_ids):
     return pos
 
 
-def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_range=None, start_index=0):
+def lowest_index_greater_zero(logits, insert_token_ids,
+                              plot_label=None, gt_range=None, start_index=0, return_id=False, mask=None):
     # logits is Batch, Time, Vocab
+
+    if mask is not None:
+        # No constrains (masking) of last logit, as it is predicting just after sequence - where everything is allowed
+        mask = mask.to(logits.device)
+        logits[:, :-1, insert_token_ids] = logits[:, :-1, insert_token_ids].masked_fill(~mask, float('-inf'))
 
     # Batch, Time, Vocab
     greedy_next = torch.argmax(logits, dim=-1, keepdim=False).to("cpu")[..., newaxis]
@@ -89,6 +99,9 @@ def lowest_index_greater_zero(logits, insert_token_ids, plot_label=None, gt_rang
         logits_ = max_tag - max_other
 
         plot_logits_at_positions(plot_label, first_greater, logits_, gt_range, start_at=start_index)
+
+    if return_id:
+        return first_greater, greedy_next[:, first_greater]
 
     return first_greater
 
@@ -127,6 +140,7 @@ def append_tokens_batched(x, append_toks):
         ],
         dim=1
     )
+
 
 # -----------------------------
 # Loop functions
@@ -175,11 +189,11 @@ def generate_standard_answers(model, data, start_span_tokens, end_span_tokens, t
 
             if generated_ids[start_tok] not in start_span_tokens_id:
                 print(f"Warning generated_ids[start_tok] {generated_ids[start_tok]}")
-                print(f"\tcontext: generated_ids[start_tok-2:start_tok+2] {generated_ids[start_tok-2:start_tok+2]}")
+                print(f"\tcontext: generated_ids[start_tok-2:start_tok+2] {generated_ids[start_tok - 2:start_tok + 2]}")
 
             if generated_ids[end_tok] not in end_span_tokens_id:
                 print(f"Warning generated_ids[end_tok] {generated_ids[end_tok]}")
-                print(f"\tcontext: generated_ids[end_tok-2:end_tok+2] {generated_ids[end_tok-2:end_tok+2]}")
+                print(f"\tcontext: generated_ids[end_tok-2:end_tok+2] {generated_ids[end_tok - 2:end_tok + 2]}")
 
         # print_topk_logits_decoded(
         #     tokens_finder,
@@ -410,7 +424,7 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
                     before = append_tokens_batched(before, next_span_token_id)
 
             assert "�" not in model.tokenizer.decode(ctx_enc[:, start:][0])
-
+            assert "�" not in model.tokenizer.decode(ctx_enc[:, :start][0])
 
             # <start> tag is generated at this point; now catch back with middle
             first_middle = ctx_enc[:, start].item()
@@ -435,10 +449,10 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
             after = ctx_enc[:, end:]
 
             annotated_tokens = torch.cat([
-                    before,
-                    append_tokens_batched(middle, end_span_token_id),
-                    after
-                ],
+                before,
+                append_tokens_batched(middle, end_span_token_id),
+                after
+            ],
                 dim=1
             )[0].tolist()
 
@@ -465,6 +479,215 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
     return results
 
 
+def verify_tokens_cmp(greedy_next, verify_tokens):
+    """
+    Verifies how many tokens are verified by comparing greedy next and tokens to be verified.
+    Returns number of verified tokens.
+    """
+    not_eq = ~greedy_next[0, :len(verify_tokens)].eq(torch.tensor(verify_tokens).to(greedy_next.device))
+    if not not_eq.any():
+        return len(verify_tokens)
+    first_negative = torch.argmax(not_eq.to(torch.int)).item()
+    return first_negative
+
+
+def build_mask(completing_bytes, sgts_stripped) -> Tensor:
+    mask = torch.empty((len(completing_bytes), len(sgts_stripped)), dtype=torch.bool)
+    for i, c in enumerate(completing_bytes):
+        for j, sgt_stripped in enumerate(sgts_stripped):
+            if sgt_stripped.startswith(c):
+                x = sgt_stripped[len(c):]
+                # Only allowed if nothing remains or if only space remains
+                is_space_or_empty = (x == b"" or x == b" ")
+                mask[i, j] = is_space_or_empty
+            else:
+                mask[i, j] = False
+    return mask
+
+
+def create_allowed_mask(tokens_finder, force_tokens, next_tags):
+    """
+    Filters allowed_tokens for each time position by eliminating tokens, that do not share prefix.
+    Returns only a mask (time, allowed_tokens) that should be interpreted as mask for allowed_tokens at each position.
+    """
+
+    sgts = [
+        [x for x in tokens_finder.get_generating_tokens(tag_string)]
+        for tag_string in next_tags
+    ][0]
+
+    sgts_stripped = [
+        tokens_finder.get_stripped_sgts(next_tag)
+        for next_tag in next_tags
+    ][0]
+
+    completing_bytes = tokens_finder.return_token_completing_bytes(force_tokens[0].tolist())
+
+    if any(len(x) > 0 for x in completing_bytes):
+        # There is some continuation in the seq - todo: check good behaviour
+        pass
+
+    # Create another dimension for batch
+    mask = build_mask(completing_bytes, sgts_stripped)[newaxis]
+    return sgts, mask, completing_bytes
+
+
+def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, force_tokens, next_tags):
+    """
+    :param static_prefix: tokens that were already generated, only for context
+    :param verify_tokens: rest of tokens to generate valid tag
+    :param force_tokens: teacher forced tokens - proposed by tokenizer
+    :next_tags: finds position to insert one of these tags (only if all tokens are verified)
+    returns list of verified + forced tokens + one next
+
+    Never inserts tag to a position that would generate invalid string.
+    """
+
+    # Variable initialization
+    if verify_tokens is None:
+        verify_tokens = []
+
+    nr_tokens_verify = len(verify_tokens)
+    verify_tokens = torch.tensor(verify_tokens, dtype=torch.int)[None, ...]  # Create batch dim to match input
+
+    sgts_tag, mask_allow_at, completing_bytes = create_allowed_mask(tokens_finder, force_tokens, next_tags)
+
+    # One forward pass
+    logits = model.encode_ctx_verify(static_prefix, force_tokens, verify_tokens=verify_tokens)
+
+    #  Verify guessed tokens
+    if nr_tokens_verify > 0:
+        greedy_verify = torch.argmax(logits[:, :nr_tokens_verify], dim=-1, keepdim=False)
+        nr_verified = verify_tokens_cmp(greedy_verify, verify_tokens)
+
+        # Not all tokens are verified
+        if nr_verified < nr_tokens_verify:
+            greedy_next_id = logits[nr_verified].argmax(dim=-1).item()  # Use one greedy todo verify
+            return verify_tokens[:nr_verified] + [greedy_next_id], None # todo: verify none, some bytes can be generated
+
+    # remove verified logits
+    logits = logits[:, nr_tokens_verify:]
+
+    tag_position, greedy_next_id = lowest_index_greater_zero(
+        logits,
+        sgts_tag,
+        mask=mask_allow_at,
+        return_id=True
+    )
+
+    forced_tokens = force_tokens[:, :tag_position]
+    generated_tokens = torch.cat(
+        [verify_tokens, forced_tokens, greedy_next_id],
+        dim=1
+    )[0].tolist()
+    accepted_bytes = tokens_finder.return_token_bytes(forced_tokens[0], as_bytes=True) + completing_bytes[tag_position]
+    return generated_tokens, accepted_bytes
+
+
+class Tag:
+    def __init__(self, str_seq: str, tokens_finder: TokenByteFinder):
+        self.str = str_seq
+        self.all_paths = tokens_finder.find_all_paths(str_seq)
+        self.all_paths_tokens = [[token_id for token_id, t_bytes in path] for path in self.all_paths]
+
+    def __str__(self):
+        return self.str
+
+    def __getitem__(self, item):
+        return self.all_paths_tokens[item]
+
+class Tags:
+    def __init__(self, tags_string:list[str], tokens_finder):
+        self.tags = [Tag(s, tokens_finder) for s in tags_string]
+
+    def to_str(self):
+        return [str(tag) for tag in self.tags]
+
+def guess_from_last(tags: Tags, generated_tokens):
+    if not generated_tokens:
+        return None
+    return str(tags[0])
+
+
+def generate_verify_guess_parallel(model, data, template, start_span_tokens, end_span_tokens):
+
+    tokens_finder = TokenByteFinder(model.tokenizer)
+
+    opening_tags = Tags(start_span_tokens, tokens_finder)
+    closing_tags = Tags(end_span_tokens, tokens_finder)
+
+    results = TimedList()
+    for record in tqdm.tqdm(data, desc="Parallel diff generation"):
+        context = record['context']
+        question = record['question']
+
+        prefix = create_prompt(
+            template,
+            start_span_tokens=opening_tags.to_str(),
+            end_span_tokens=closing_tags.to_str(),
+            question=question,
+            context=context
+        )
+        prefix = model.tokenizer(prefix, return_tensors="pt")["input_ids"]
+
+        generate_bytes = context.encode("utf-8")
+        generated_tokens = []
+
+        current_tags = opening_tags  # Opening tags that can be generated
+        next_tags = closing_tags  # Closing tags that can be generated
+
+        while generate_bytes:
+            # Tags that are valid trough this tag generation, will shrink when first token of tag is generated
+            possible_tags = copy.deepcopy(current_tags)
+
+            while True:
+                # todo: this must always select correct closing tag
+                guessed_tag = guess_from_last(possible_tags, generated_tokens)
+
+                # verify guessed_tag
+                verify_tokens = None if guessed_tag is None else model.tokenizer.tokenize(guessed_tag)
+                force_tokens = model.tokenizer(
+                    generate_bytes.decode("utf-8"),
+                    add_special_tokens=False, return_tensors="pt"
+                )["input_ids"]
+
+                new_tokens, accepted_bytes = forward_verify_predict(
+                    model,
+                    tokens_finder,
+                    prefix,  # todo + generated tokens
+                    verify_tokens,
+                    force_tokens,
+                    next_tags.to_str()
+                )
+                generated_tokens.extend(new_tokens)
+                assert generate_bytes.startswith(accepted_bytes)
+                generate_bytes = generate_bytes.removeprefix(accepted_bytes)
+
+                completed_tag = False  # todo: match end of generated_tokens to detect generated tokens / verified token
+                if completed_tag:
+                    current_tags.pop(completed_tag)  # todo: remove confirmed tag from list
+                    break
+
+            # swap current and next
+            current_tags, next_tags = next_tags, current_tags
+
+        raw_output = model.tokenizer.decode(generated_tokens)
+        answer = extract_span(opening_tags[0], closing_tags[0], raw_output)  # todo: multi-span extraction
+
+        results.append(
+            {
+                **record,
+                "prediction": answer,
+                "raw_output": raw_output,
+                "ctx_enc": generated_tokens,
+            }
+        )
+
+        # todo: adjust output for multi-annotated spans
+        # todo: adjust all other algs. to follow this output
+        # todo: regenerate to match outputs
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LLM extractive QA processing.")
 
@@ -484,6 +707,7 @@ def parse_args():
     parser.add_argument("--method", type=str,
                         choices=['standard', 'standard_custom_decode',
                                  'parallel', 'parallel_multiple', 'parallel_multiple_diff', 'parallel_tokens_only',
+                                 'verify_guess_parallel',
                                  'all'],
                         default='all',
                         help="Which method to run and save.")
@@ -562,8 +786,9 @@ def main():
         "parallel_multiple": functools.partial(generate_parallel_answers, one_char=False),
         "parallel_multiple_diff": functools.partial(generate_parallel_answers_diff),
         "parallel_tokens_only": functools.partial(generate_parallel_answers_tokens_only),
+        "verify_guess_parallel": functools.partial(generate_verify_guess_parallel)
     }
-    
+
     common_params = {
         "model": model,
         "data": data,
@@ -575,7 +800,7 @@ def main():
     for method_name in generation_methods:
         if args.method != "all" and args.method != method_name:
             continue
-        
+
         assert method_name in generation_methods, f"'{method_name}' method is not implemented."
 
         run_and_save_results(

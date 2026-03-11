@@ -6,6 +6,7 @@ language model.
 """
 from collections import defaultdict
 
+import torch
 from transformers import AutoTokenizer
 
 
@@ -36,6 +37,35 @@ def bytes_to_unicode():
     return dict(zip(bs, cs))
 
 
+def leading_utf8_continuations(token_bytes):
+    """
+    token_bytes: list[int]  (each int 0–255)
+
+    Returns the prefix of bytes that are UTF-8 continuation bytes (10xxxxxx),
+    meaning they finish a character started earlier.
+    """
+    out = []
+    for b in token_bytes:
+        if (b & 0b11000000) == 0b10000000:  # starts with '10'
+            out.append(b)
+        else:
+            break
+    return bytes(out)
+
+
+def remove_matching_suffix(A: bytes, B: bytes) -> bytes:
+    """
+    Remove the longest suffix of A that matches a prefix of B.
+    """
+    max_len = min(len(A), len(B))
+
+    for k in range(max_len, 0, -1):
+        if A[-k:] == B[:k]:
+            return A[:-k]
+
+    return A
+
+
 class TokenByteFinder:
     def __init__(self, tokenizer):
         if isinstance(tokenizer, str):
@@ -51,6 +81,15 @@ class TokenByteFinder:
             t_id: bytes([unicode_to_bytes[ord(t_char)] for t_char in t])
             for t, t_id in self.vocab.items()
         }
+
+        max_id = max(self.token_bytes)
+        self.completing_bytes = [b""] * (max_id + 1)
+        for t_id, t_bytes in self.token_bytes.items():
+            self.completing_bytes[t_id] = leading_utf8_continuations(t_bytes)
+
+        self.cached_generating_tokens = {}
+        self.cached_stripped_sgts = {}
+        self.cached_paths = {}
 
     def get_single_token(self, char):
         # [0] to remove batch dim
@@ -91,13 +130,32 @@ class TokenByteFinder:
         return containment
 
     def get_generating_tokens(self, any_string):
+        if any_string in self.cached_generating_tokens:
+            return self.cached_generating_tokens[any_string]
+
         target_bytes = self.encode_str_utf8(any_string)
         prefix_overlaps = self.find_prefix_overlaps(target_bytes)
         containment = self.find_containment_tokens(target_bytes)
 
         # Merging keys from both dictionaries and removing duplicates
         generating_tokens = list(set(prefix_overlaps.keys()) | set(containment.keys()))
+
+        self.cached_generating_tokens[any_string] = generating_tokens
         return generating_tokens
+
+    def get_stripped_sgts(self, any_string):
+        if any_string in self.cached_stripped_sgts:
+            return self.cached_stripped_sgts[any_string]
+
+        sgts = self.get_generating_tokens(any_string)
+        sgts_bytes = self.return_token_bytes(sgts)
+
+        # Prepare bytes for suffix removal
+        bytes_remove = any_string.encode("utf-8")
+        stripped_sgts = [remove_matching_suffix(sgt, bytes_remove) for sgt in sgts_bytes]
+
+        self.cached_stripped_sgts[any_string] = stripped_sgts
+        return stripped_sgts
 
     def get_generating_tokens_all(self, any_string):
         target_bytes = self.encode_str_utf8(any_string)
@@ -108,17 +166,34 @@ class TokenByteFinder:
         generating_tokens = {**prefix_overlaps, **containment}
         return generating_tokens
 
-    def return_token_bytes(self, ids):
+    def return_token_bytes(self, ids, as_bytes=False):
         if type(ids) == int:
             return self.token_bytes[ids]
 
+        if type(ids) == torch.Tensor:
+            ids = ids.tolist()
+
         if type(ids) == list:
-            return [self.token_bytes[i] for i in ids]
+            sq = [self.token_bytes[i] for i in ids]
+            return b"".join(sq) if as_bytes else sq
+
+        return None
+
+
+    def return_token_completing_bytes(self, ids):
+        if type(ids) == int:
+            return self.completing_bytes[ids]
+
+        if type(ids) == list:
+            return [self.completing_bytes[i] for i in ids]
 
         return None
 
     def find_all_paths(self, target_bytes):
         target_bytes = self.encode_str_utf8(target_bytes)
+
+        if target_bytes in self.cached_paths:
+            return self.cached_paths[target_bytes]
 
         generating_tokens = self.get_generating_tokens_all(target_bytes)
         path_list = [[(k, v)] for k, v in generating_tokens.items()]
@@ -152,6 +227,8 @@ class TokenByteFinder:
             if all(target_bytes in join_path_bytes(new_path)
                    for new_path in longer_path_list):
                 break
+
+        self.cached_paths[target_bytes] = path_list
         return path_list
 
 
@@ -178,7 +255,7 @@ class TokenByteFinder:
         elif type(any_string) == bytes:
             return any_string
         else:
-            raise TypeError()
+            raise TypeError(f"Unsupported type {type(any_string)}")
 
 def get_valid_next(prefix_dict, target_list):
     out = []
