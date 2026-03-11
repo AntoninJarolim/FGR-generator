@@ -479,14 +479,18 @@ def generate_parallel_answers_tokens_only(model, data, template, start_span_toke
     return results
 
 
-def verify_tokens_cmp(greedy_next, verify_tokens):
+def verify_tokens_cmp(verify_logits, verify_tokens):
     """
     Verifies how many tokens are verified by comparing greedy next and tokens to be verified.
     Returns number of verified tokens.
     """
-    not_eq = ~greedy_next[0, :len(verify_tokens)].eq(torch.tensor(verify_tokens).to(greedy_next.device))
+    if verify_tokens.size(1) == 0:
+        # Nothing to verify
+        return 0
+    greedy_next = torch.argmax(verify_logits, dim=-1, keepdim=False)
+    not_eq = ~greedy_next[0].eq(verify_tokens.to(greedy_next.device))
     if not not_eq.any():
-        return len(verify_tokens)
+        return verify_tokens.size(1)
     first_negative = torch.argmax(not_eq.to(torch.int)).item()
     return first_negative
 
@@ -542,46 +546,40 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
 
     Never inserts tag to a position that would generate invalid string.
     """
-
-    # Variable initialization
-    if verify_tokens is None:
-        verify_tokens = []
-
-    nr_tokens_verify = len(verify_tokens)
-    verify_tokens = torch.tensor(verify_tokens, dtype=torch.int)[None, ...]  # Create batch dim to match input
-
-    sgts_tag, mask_allow_at, completing_bytes = create_allowed_mask(tokens_finder, force_tokens, next_tags)
+    # Todo-batch: this needs to verified per-batch somehow
+    nr_tokens_verify = verify_tokens.size(1)
 
     # One forward pass
     logits = model.encode_ctx_verify(static_prefix, force_tokens, verify_tokens=verify_tokens)
 
     #  Verify guessed tokens
-    if nr_tokens_verify > 0:
-        greedy_verify = torch.argmax(logits[:, :nr_tokens_verify], dim=-1, keepdim=False)
-        nr_verified = verify_tokens_cmp(greedy_verify, verify_tokens)
+    verify_logits, logits = logits[:, :nr_tokens_verify], logits[:, nr_tokens_verify:]
+    nr_verified = verify_tokens_cmp(verify_logits, verify_tokens)
 
-        # Not all tokens are verified
-        if nr_verified < nr_tokens_verify:
-            greedy_next_id = logits[nr_verified].argmax(dim=-1).item()  # Use one greedy todo verify
-            return verify_tokens[:nr_verified] + [greedy_next_id], None # todo: verify none, some bytes can be generated
+    # Not all tokens are verified
+    if nr_verified < nr_tokens_verify:
+        greedy_next_id = verify_logits[nr_verified].argmax(dim=-1).item()
+        verify_tokens = verify_tokens[:nr_verified]
+        forced = torch.empty(1, 0).to(torch.int)
+        forced_bytes = b""
+    else:
+        sgts_tag, mask_allow_at, completing_bytes = create_allowed_mask(tokens_finder, force_tokens, next_tags)
+        tag_position, greedy_next_id = lowest_index_greater_zero(
+            logits,
+            sgts_tag,
+            mask=mask_allow_at,
+            return_id=True
+        )
 
-    # remove verified logits
-    logits = logits[:, nr_tokens_verify:]
+        forced = force_tokens[:, :tag_position]
+        forced_bytes = tokens_finder.return_token_bytes(forced[0], as_bytes=True) + completing_bytes[tag_position]
 
-    tag_position, greedy_next_id = lowest_index_greater_zero(
-        logits,
-        sgts_tag,
-        mask=mask_allow_at,
-        return_id=True
-    )
-
-    forced_tokens = force_tokens[:, :tag_position]
-    generated_tokens = torch.cat(
-        [verify_tokens, forced_tokens, greedy_next_id],
-        dim=1
-    )[0].tolist()
-    accepted_bytes = tokens_finder.return_token_bytes(forced_tokens[0], as_bytes=True) + completing_bytes[tag_position]
-    return generated_tokens, accepted_bytes
+    return {
+        'verified': verify_tokens,
+        'forced': forced,
+        'forced_bytes': forced_bytes,
+        'greedy': greedy_next_id,
+    }
 
 
 class Tag:
@@ -616,6 +614,7 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
     opening_tags = Tags(start_span_tokens, tokens_finder)
     closing_tags = Tags(end_span_tokens, tokens_finder)
 
+    batch_size = 1
     results = TimedList()
     for record in tqdm.tqdm(data, desc="Parallel diff generation"):
         context = record['context']
@@ -645,13 +644,15 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                 guessed_tag = guess_from_last(possible_tags, generated_tokens)
 
                 # verify guessed_tag
-                verify_tokens = None if guessed_tag is None else model.tokenizer.tokenize(guessed_tag)
+                verify_tokens = (torch.empty(batch_size, 0).to(torch.int)
+                                 if guessed_tag is None else
+                                 model.tokenizer.tokenize(guessed_tag))
                 force_tokens = model.tokenizer(
                     generate_bytes.decode("utf-8"),
                     add_special_tokens=False, return_tensors="pt"
                 )["input_ids"]
 
-                new_tokens, accepted_bytes = forward_verify_predict(
+                out = forward_verify_predict(
                     model,
                     tokens_finder,
                     prefix,  # todo + generated tokens
@@ -659,9 +660,12 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                     force_tokens,
                     next_tags.to_str()
                 )
-                generated_tokens.extend(new_tokens)
-                assert generate_bytes.startswith(accepted_bytes)
-                generate_bytes = generate_bytes.removeprefix(accepted_bytes)
+
+                assert generate_bytes.startswith(out['forced_bytes'])
+                generate_bytes = generate_bytes.removeprefix(out['forced_bytes'])
+
+                # always concat verified tokens (can be empty)
+                # always concat forced tokens -- is empty when not all tokens are verified
 
                 completed_tag = False  # todo: match end of generated_tokens to detect generated tokens / verified token
                 if completed_tag:
