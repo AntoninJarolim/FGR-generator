@@ -557,7 +557,8 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
     nr_verified = verify_tokens_cmp(verify_logits, verify_tokens)
 
     # Not all tokens are verified
-    if nr_verified < nr_tokens_verify:
+    all_verified = nr_verified < nr_tokens_verify
+    if all_verified:
         greedy_next_id = verify_logits[nr_verified].argmax(dim=-1).item()
         verify_tokens = verify_tokens[:nr_verified]
         forced = torch.empty(1, 0).to(torch.int)
@@ -575,10 +576,11 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
         forced_bytes = tokens_finder.return_token_bytes(forced[0], as_bytes=True) + completing_bytes[tag_position]
 
     return {
+        'all_verified': nr_verified,
         'verified': verify_tokens,
         'forced': forced,
-        'forced_bytes': forced_bytes,
         'greedy': greedy_next_id,
+        'forced_bytes': forced_bytes,
     }
 
 
@@ -628,25 +630,21 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
             context=context
         )
         prefix = model.tokenizer(prefix, return_tensors="pt")["input_ids"]
+        prefix_len_start = prefix.size(1)
 
         generate_bytes = context.encode("utf-8")
-        generated_tokens = []
 
         current_tags = opening_tags  # Opening tags that can be generated
         next_tags = closing_tags  # Closing tags that can be generated
 
+        partial_tag = torch.empty(batch_size, 0).to(torch.int)
         while generate_bytes:
             # Tags that are valid trough this tag generation, will shrink when first token of tag is generated
             possible_tags = copy.deepcopy(current_tags)
-
             while True:
-                # todo: this must always select correct closing tag
-                guessed_tag = guess_from_last(possible_tags, generated_tokens)
 
                 # verify guessed_tag
-                verify_tokens = (torch.empty(batch_size, 0).to(torch.int)
-                                 if guessed_tag is None else
-                                 model.tokenizer.tokenize(guessed_tag))
+                verify_tokens = partial_tag
                 force_tokens = model.tokenizer(
                     generate_bytes.decode("utf-8"),
                     add_special_tokens=False, return_tensors="pt"
@@ -655,27 +653,41 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                 out = forward_verify_predict(
                     model,
                     tokens_finder,
-                    prefix,  # todo + generated tokens
+                    prefix,
                     verify_tokens,
                     force_tokens,
                     next_tags.to_str()
                 )
 
+                # Validate on byte level
                 assert generate_bytes.startswith(out['forced_bytes'])
                 generate_bytes = generate_bytes.removeprefix(out['forced_bytes'])
+
+                # Add 'confirmed' tokens to static prefix
+                prefix = torch.cat(
+                    (prefix, out['verified'], out['forced'], out['greedy']),
+                    dim=1
+                )
+
+                if out['all_verified']:
+                    completed_tag = None # todo: the one that was to be verified
+                    cat_tag = (out['greedy'], )
+                    current_tags.pop(completed_tag)
+                    # todo: can guess new tag now
+                else:
+                    cat_tag = (partial_tag, out['verified'], out['greedy'])
+
+                partial_tag = torch.cat(cat_tag, dim=1)
+
 
                 # always concat verified tokens (can be empty)
                 # always concat forced tokens -- is empty when not all tokens are verified
 
-                completed_tag = False  # todo: match end of generated_tokens to detect generated tokens / verified token
-                if completed_tag:
-                    current_tags.pop(completed_tag)  # todo: remove confirmed tag from list
-                    break
 
             # swap current and next
             current_tags, next_tags = next_tags, current_tags
 
-        raw_output = model.tokenizer.decode(generated_tokens)
+        raw_output = model.tokenizer.decode(prefix[prefix_len_start:])
         answer = extract_span(opening_tags[0], closing_tags[0], raw_output)  # todo: multi-span extraction
 
         results.append(
@@ -683,7 +695,7 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                 **record,
                 "prediction": answer,
                 "raw_output": raw_output,
-                "ctx_enc": generated_tokens,
+                "ctx_enc": prefix[prefix_len_start:],
             }
         )
 
