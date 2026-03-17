@@ -593,28 +593,77 @@ class Tag:
     def __str__(self):
         return self.str
 
-    def __getitem__(self, item):
-        return self.all_paths_tokens[item]
+    def shares_prefix(self, prefix):
+        """
+        Returns true if any path starts with prefix
+        """
+        return any([prefix == p for p in self.all_paths_tokens])
 
-class Tags:
-    def __init__(self, tags_string:list[str], tokens_finder):
-        self.tags = [Tag(s, tokens_finder) for s in tags_string]
+class PairedTags:
+    def __init__(self, tags_b:list[str], tags_a:list[str], tokens_finder):
 
-    def to_str(self):
-        return [str(tag) for tag in self.tags]
+        if len(tags_a) != len(tags_b):
+            raise ValueError(f"len(tags_a) != len(tags_b) {len(tags_a), len(tags_b)}")
 
-def guess_from_last(tags: Tags, generated_tokens):
-    if not generated_tokens:
-        return None
-    return str(tags[0])
+        self.tags_a = [Tag(s, tokens_finder) for s in tags_a]
+        self.tags_b = [Tag(s, tokens_finder) for s in tags_b]
+        self.active_tag_ids = list(range(len(tags_a)))
+        self.a_active = True  # A's are active at start
+
+        self.generated_a = None
+        self.restart_generated()
+
+
+    @staticmethod
+    def _to_str(tags):
+        return [str(tag) for tag in tags]
+
+    @property
+    def active_tags(self):
+        active = self.tags_a if self.a_active else self.tags_b
+        return [a for i, a in enumerate(active) if i in self.active_tag_ids]
+
+    def a_to_str(self):
+        return self._to_str(self.tags_a)
+
+    def b_to_str(self):
+        return self._to_str(self.tags_b)
+
+    def active_to_str(self):
+        return self._to_str(self.active_tags)
+
+    def switch_active_tags(self):
+        if self.a_active:
+            last_generated_a = 2
+            self.active_tag_ids = last_generated_a
+        else:
+            self.active_tag_ids = [i for i, a in enumerate(self.tags_a) if i not in self.generated_a]
+
+        self.a_active = not self.a_active
+
+    def restart_generated(self):
+        self.generated_a = []
+
+    def filter_active(self, generated_tokens):
+        """
+        Updates list of active tokens, active token shares path with already
+        generated tokens.
+        """
+        # todo: rewrite to cuda version
+        if not generated_tokens:
+            return
+
+        active = self.tags_a if self.a_active else self.tags_b
+        self.active_tag_ids = [t_id for t_id in self.active_tag_ids if active[t_id].shares_prefix(generated_tokens)]
+
 
 
 def generate_verify_guess_parallel(model, data, template, start_span_tokens, end_span_tokens):
-
+    """
+    Constrained decoding of LLM with insertion of Tags.
+    """
     tokens_finder = TokenByteFinder(model.tokenizer)
-
-    opening_tags = Tags(start_span_tokens, tokens_finder)
-    closing_tags = Tags(end_span_tokens, tokens_finder)
+    tags = PairedTags(start_span_tokens, end_span_tokens, tokens_finder)
 
     batch_size = 1
     results = TimedList()
@@ -624,27 +673,24 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
 
         prefix = create_prompt(
             template,
-            start_span_tokens=opening_tags.to_str(),
-            end_span_tokens=closing_tags.to_str(),
+            start_span_tokens=tags.a_to_str(),
+            end_span_tokens=tags.b_to_str(),
             question=question,
             context=context
         )
         prefix = model.tokenizer(prefix, return_tensors="pt")["input_ids"]
         prefix_len_start = prefix.size(1)
 
+        partial_tag = torch.empty(batch_size, 0).to(torch.int)
         generate_bytes = context.encode("utf-8")
 
-        current_tags = opening_tags  # Opening tags that can be generated
-        next_tags = closing_tags  # Closing tags that can be generated
-
-        partial_tag = torch.empty(batch_size, 0).to(torch.int)
+        # All bytes must be generated
         while generate_bytes:
-            # Tags that are valid trough this tag generation, will shrink when first token of tag is generated
-            possible_tags = copy.deepcopy(current_tags)
+
+            # One tag generation loop
             while True:
 
                 # verify guessed_tag
-                verify_tokens = partial_tag
                 force_tokens = model.tokenizer(
                     generate_bytes.decode("utf-8"),
                     add_special_tokens=False, return_tensors="pt"
@@ -653,10 +699,10 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                 out = forward_verify_predict(
                     model,
                     tokens_finder,
-                    prefix,
-                    verify_tokens,
-                    force_tokens,
-                    next_tags.to_str()
+                    static_prefix=prefix,
+                    verify_tokens=partial_tag,
+                    force_tokens=force_tokens,
+                    next_tags=tags.active_to_str()
                 )
 
                 # Validate on byte level
@@ -664,28 +710,36 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                 generate_bytes = generate_bytes.removeprefix(out['forced_bytes'])
 
                 # Add 'confirmed' tokens to static prefix
+                # always concat verified tokens (is empty when nothing to verify)
+                # always concat forced tokens (is empty when not all tokens are verified)
                 prefix = torch.cat(
-                    (prefix, out['verified'], out['forced'], out['greedy']),
+                    [prefix, out['verified'], out['forced'], out['greedy']],
                     dim=1
                 )
 
+                partial_tag = torch.cat(
+                    [partial_tag, out['verified'], out['greedy']],
+                    dim=1
+                )
+
+                # todo: compare partial_tag with all current_tags
+                # partial_tag contains one of current_tags -> switch to end tag generation
+                tags.filter_active(partial_tag)
+
                 if out['all_verified']:
                     completed_tag = None # todo: the one that was to be verified
-                    cat_tag = (out['greedy'], )
                     current_tags.pop(completed_tag)
                     # todo: can guess new tag now
                 else:
                     cat_tag = (partial_tag, out['verified'], out['greedy'])
 
-                partial_tag = torch.cat(cat_tag, dim=1)
-
-
-                # always concat verified tokens (can be empty)
-                # always concat forced tokens -- is empty when not all tokens are verified
+            tags.switch_active_tags()
 
 
             # swap current and next
             current_tags, next_tags = next_tags, current_tags
+
+        tags.restart_generated()
 
         raw_output = model.tokenizer.decode(prefix[prefix_len_start:])
         answer = extract_span(opening_tags[0], closing_tags[0], raw_output)  # todo: multi-span extraction
@@ -727,7 +781,11 @@ def parse_args():
                                  'all'],
                         default='all',
                         help="Which method to run and save.")
-
+    parser.add_argument(
+        "--model-half",
+        action="store_true",
+        help="Load the model in half precision (bfloat16)."
+    )
     args = parser.parse_args()
 
     # Opening and closing tags lists must have same len
@@ -788,7 +846,7 @@ def main():
     args.extracted_data_path = os.path.join(args.extracted_data_path, args.model.strip("/").split("/")[-1])
 
     template = read_template(args.template_path)
-    model = LLMRunner(args.model)
+    model = LLMRunner(args.model, half=args.model_half)
 
     data = load_or_create_gt_data(
         args.extracted_data_path,

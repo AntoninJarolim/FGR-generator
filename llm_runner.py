@@ -39,11 +39,11 @@ def print_first_logits(all_logits, first_logits):
 
 
 class LLMRunner:
-    def __init__(self, model_name, device=None, max_new_tokens=512, do_sample=False):
+    def __init__(self, model_name, half=False, device=None, max_new_tokens=512, do_sample=False):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float32,
+            dtype=torch.bfloat16 if half else torch.float32,
         )
 
         self.model.eval()
