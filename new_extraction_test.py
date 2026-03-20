@@ -609,14 +609,20 @@ class Tag:
     def restart_generated(self):
         self.generated = False
 
-    def is_generated(self):
-        return self.generated
-
     def generate(self):
         self.generated = True
 
+    def is_generated(self):
+        return self.generated
+
     def disable(self):
         self.disabled = True
+
+    def enable(self):
+        self.disabled = False
+
+    def is_disabled(self):
+        return self.disabled
 
     def pad_to_match(self, tensor_a):
         """
@@ -675,11 +681,19 @@ class PairedTags:
     def _to_str(tags):
         return [str(tag) for tag in tags]
 
+    @staticmethod
+    def _filter_valid(tags):
+        next_valid = [
+            t for t in tags
+            if not t.is_generated() and not t.is_disabled()
+        ]
+        return next_valid
+
     def current_to_str(self):
-        return self._to_str(self.tags_current)
+        return self._to_str(self._filter_valid(self.tags_current))
 
     def next_to_str(self):
-        return self._to_str(self.tags_next)
+        return self._to_str(self._filter_valid(self.tags_next))
 
     def switch_next_tags(self):
         self.tags_current, self.tags_next = self.tags_next, self.tags_current
@@ -771,7 +785,7 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
                     dim=1
                 )
 
-            # partial_tag contains one of current_tags -> switch to complementary tag generation
+            # partial_tag contains one of current_tags
             verify_tokens, single_valid = tags.predict_one_current(partial_tag)
 
             # Add 'confirmed' tokens to static prefix
@@ -779,7 +793,8 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
             # always concat forced tokens (is empty when not all tokens are verified)
             cat = [prefix, out['verified'], out['forced'], out['greedy']]
             if single_valid:
-                cat.append(verify_tokens.clone()) # Create batch dim for concat
+                # Add tokens for concatenation and reset verify_tokens variable
+                cat.append(verify_tokens.clone())
                 verify_tokens = torch.empty(batch_size, 0).to(torch.int)
 
             prefix = torch.cat(cat, dim=1)
