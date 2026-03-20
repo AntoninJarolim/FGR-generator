@@ -1,16 +1,18 @@
-import copy
 import functools
 import argparse
 import os.path
 import time
-from symtable import Class
+from itertools import chain
+from typing import Any
 
+import torch.nn.functional as F
 import torch
 import json
 import tqdm
 from jinja2 import Template
-from sympy import true
 from torch import newaxis, Tensor
+from torch.nn.utils.rnn import pad_sequence
+
 from find_BLO import TokenByteFinder
 from llm_runner import LLMRunner, get_model_config
 from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
@@ -556,9 +558,9 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
     verify_logits, logits = logits[:, :nr_tokens_verify], logits[:, nr_tokens_verify:]
     nr_verified = verify_tokens_cmp(verify_logits, verify_tokens)
 
-    # Not all tokens are verified
-    all_verified = nr_verified < nr_tokens_verify
-    if all_verified:
+    # All tokens are verified
+    all_verified = nr_verified >= nr_tokens_verify
+    if not all_verified:
         greedy_next_id = verify_logits[nr_verified].argmax(dim=-1).item()
         verify_tokens = verify_tokens[:nr_verified]
         forced = torch.empty(1, 0).to(torch.int)
@@ -576,7 +578,7 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
         forced_bytes = tokens_finder.return_token_bytes(forced[0], as_bytes=True) + completing_bytes[tag_position]
 
     return {
-        'all_verified': nr_verified,
+        'all_verified': all_verified,
         'verified': verify_tokens,
         'forced': forced,
         'greedy': greedy_next_id,
@@ -585,19 +587,80 @@ def forward_verify_predict(model, tokens_finder, static_prefix, verify_tokens, f
 
 
 class Tag:
-    def __init__(self, str_seq: str, tokens_finder: TokenByteFinder):
+    def __init__(self, str_seq: str, tag_id: int, tokens_finder: TokenByteFinder):
         self.str = str_seq
         self.all_paths = tokens_finder.find_all_paths(str_seq)
-        self.all_paths_tokens = [[token_id for token_id, t_bytes in path] for path in self.all_paths]
+        self.tag_id = tag_id
+
+        self.disabled = False
+        self.generated = False
+
+        all_paths_tokens = [
+            torch.tensor([token_id for token_id, t_bytes in path])
+            for path in self.all_paths
+        ]
+
+        self.all_paths_tokens = pad_sequence(all_paths_tokens, batch_first=True, padding_value=-100)
+
 
     def __str__(self):
         return self.str
 
-    def shares_prefix(self, prefix):
+    def restart_generated(self):
+        self.generated = False
+
+    def is_generated(self):
+        return self.generated
+
+    def generate(self):
+        self.generated = True
+
+    def disable(self):
+        self.disabled = True
+
+    def pad_to_match(self, tensor_a):
         """
-        Returns true if any path starts with prefix
+        Applies padding to right of tensor_a to match dimension of self.all_paths_tokens
         """
-        return any([prefix == p for p in self.all_paths_tokens])
+        assert tensor_a.dim() == 2
+        pad_dims = (0, self.all_paths_tokens.size(-1) - tensor_a.size(-1))
+        return F.pad(tensor_a, pad_dims, value=-100)
+
+    def valid_paths(self, prefix):
+        """
+        Returns all valid token path continuations
+        """
+        # assume 'prefix' has negative values as pad value
+        # prefix (B, T)
+        # all_paths_tokens (paths, T)
+
+        prefix_size = prefix.size(-1)
+        all_paths_tokens = self.all_paths_tokens[:, :prefix_size]
+        shares_prefix = torch.all(prefix == all_paths_tokens, dim=-1)
+
+        return self.all_paths_tokens[shares_prefix]
+
+
+def paths_to_continuations(generated_tokens, tag_paths: list[Any]):
+    valid_continuations = []
+    for paths in tag_paths:
+        # 1. remove -100 from end
+        mask = paths != -100
+        lengths = mask.sum(dim=1)
+        paths_stripped = [
+            row[:length]
+            for row, length in zip(paths, lengths)
+        ]
+
+        # strip generated_tokens from start
+        prefix_len = generated_tokens.size(1)
+        paths_final = [
+            row[prefix_len:][newaxis]
+            for row in paths_stripped
+        ]
+        valid_continuations.append(paths_final)
+    return valid_continuations
+
 
 class PairedTags:
     def __init__(self, tags_b:list[str], tags_a:list[str], tokens_finder):
@@ -605,57 +668,48 @@ class PairedTags:
         if len(tags_a) != len(tags_b):
             raise ValueError(f"len(tags_a) != len(tags_b) {len(tags_a), len(tags_b)}")
 
-        self.tags_a = [Tag(s, tokens_finder) for s in tags_a]
-        self.tags_b = [Tag(s, tokens_finder) for s in tags_b]
-        self.active_tag_ids = list(range(len(tags_a)))
-        self.a_active = True  # A's are active at start
-
-        self.generated_a = None
-        self.restart_generated()
-
+        self.tags_current = [Tag(s, i, tokens_finder) for i, s in enumerate(tags_a)]
+        self.tags_next = [Tag(s, i, tokens_finder) for i, s in enumerate(tags_b)]
 
     @staticmethod
     def _to_str(tags):
         return [str(tag) for tag in tags]
 
-    @property
-    def active_tags(self):
-        active = self.tags_a if self.a_active else self.tags_b
-        return [a for i, a in enumerate(active) if i in self.active_tag_ids]
+    def current_to_str(self):
+        return self._to_str(self.tags_current)
 
-    def a_to_str(self):
-        return self._to_str(self.tags_a)
+    def next_to_str(self):
+        return self._to_str(self.tags_next)
 
-    def b_to_str(self):
-        return self._to_str(self.tags_b)
-
-    def active_to_str(self):
-        return self._to_str(self.active_tags)
-
-    def switch_active_tags(self):
-        if self.a_active:
-            last_generated_a = 2
-            self.active_tag_ids = last_generated_a
-        else:
-            self.active_tag_ids = [i for i, a in enumerate(self.tags_a) if i not in self.generated_a]
-
-        self.a_active = not self.a_active
+    def switch_next_tags(self):
+        self.tags_current, self.tags_next = self.tags_next, self.tags_current
 
     def restart_generated(self):
-        self.generated_a = []
+        for t in chain(self.tags_current, self.tags_next):
+            t.restart_generated()
 
-    def filter_active(self, generated_tokens):
+    def predict_one_current(self, generated_tokens):
         """
-        Updates list of active tokens, active token shares path with already
+        Updates list of next tokens, next token shares path with already
         generated tokens.
         """
-        # todo: rewrite to cuda version
-        if not generated_tokens:
-            return
+        tag_paths = []
 
-        active = self.tags_a if self.a_active else self.tags_b
-        self.active_tag_ids = [t_id for t_id in self.active_tag_ids if active[t_id].shares_prefix(generated_tokens)]
+        # Collect valid continuations and disable tokens with no valid continuation for next predication
+        for t in self.tags_current:
+            paths = t.valid_paths(generated_tokens) # remove dim
+            if paths.numel() == 0:
+                self.disable_next(t.tag_id)
+            tag_paths.append(paths)
 
+        # Transform valid tokenization paths to only continuations
+        valid_continuations = paths_to_continuations(generated_tokens, tag_paths)
+
+        single_valid = len(valid_continuations) == 1 and len(valid_continuations[0]) == 1
+        return valid_continuations[0][0], single_valid
+
+    def disable_next(self, tag_id):
+        self.tags_next[tag_id].disable()
 
 
 def generate_verify_guess_parallel(model, data, template, start_span_tokens, end_span_tokens):
@@ -673,8 +727,8 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
 
         prefix = create_prompt(
             template,
-            start_span_tokens=tags.a_to_str(),
-            end_span_tokens=tags.b_to_str(),
+            start_span_tokens=tags.current_to_str(),
+            end_span_tokens=tags.next_to_str(),
             question=question,
             context=context
         )
@@ -682,62 +736,58 @@ def generate_verify_guess_parallel(model, data, template, start_span_tokens, end
         prefix_len_start = prefix.size(1)
 
         partial_tag = torch.empty(batch_size, 0).to(torch.int)
+        verify_tokens = torch.empty(batch_size, 0).to(torch.int)
         generate_bytes = context.encode("utf-8")
 
         # All bytes must be generated
         while generate_bytes:
+            # verify guessed_tag
+            force_tokens = model.tokenizer(
+                generate_bytes.decode("utf-8"),
+                add_special_tokens=False, return_tensors="pt"
+            )["input_ids"]
 
-            # One tag generation loop
-            while True:
+            out = forward_verify_predict(
+                model,
+                tokens_finder,
+                static_prefix=prefix,
+                verify_tokens=verify_tokens,
+                force_tokens=force_tokens,
+                next_tags=tags.next_to_str()
+            )
 
-                # verify guessed_tag
-                force_tokens = model.tokenizer(
-                    generate_bytes.decode("utf-8"),
-                    add_special_tokens=False, return_tensors="pt"
-                )["input_ids"]
+            # Validate on byte level
+            assert generate_bytes.startswith(out['forced_bytes'])
+            generate_bytes = generate_bytes.removeprefix(out['forced_bytes'])
 
-                out = forward_verify_predict(
-                    model,
-                    tokens_finder,
-                    static_prefix=prefix,
-                    verify_tokens=partial_tag,
-                    force_tokens=force_tokens,
-                    next_tags=tags.active_to_str()
-                )
-
-                # Validate on byte level
-                assert generate_bytes.startswith(out['forced_bytes'])
-                generate_bytes = generate_bytes.removeprefix(out['forced_bytes'])
-
-                # Add 'confirmed' tokens to static prefix
-                # always concat verified tokens (is empty when nothing to verify)
-                # always concat forced tokens (is empty when not all tokens are verified)
-                prefix = torch.cat(
-                    [prefix, out['verified'], out['forced'], out['greedy']],
-                    dim=1
-                )
-
+            if out['all_verified']:
+                # already guessing path for complementary tag
+                partial_tag = out['greedy']
+                tags.switch_next_tags()
+            else:
+                # add more greedy tokens to partial_tag
                 partial_tag = torch.cat(
                     [partial_tag, out['verified'], out['greedy']],
                     dim=1
                 )
 
-                # todo: compare partial_tag with all current_tags
-                # partial_tag contains one of current_tags -> switch to end tag generation
-                tags.filter_active(partial_tag)
+            # partial_tag contains one of current_tags -> switch to complementary tag generation
+            verify_tokens, single_valid = tags.predict_one_current(partial_tag)
 
-                if out['all_verified']:
-                    completed_tag = None # todo: the one that was to be verified
-                    current_tags.pop(completed_tag)
-                    # todo: can guess new tag now
-                else:
-                    cat_tag = (partial_tag, out['verified'], out['greedy'])
+            # Add 'confirmed' tokens to static prefix
+            # always concat verified tokens (is empty when nothing to verify)
+            # always concat forced tokens (is empty when not all tokens are verified)
+            cat = [prefix, out['verified'], out['forced'], out['greedy']]
+            if single_valid:
+                cat.append(verify_tokens.clone()) # Create batch dim for concat
+                verify_tokens = torch.empty(batch_size, 0).to(torch.int)
 
-            tags.switch_active_tags()
+            prefix = torch.cat(cat, dim=1)
+
+            # todo: some checks that will remove trailing bytes from end of generated sequence
+            # or prohibit to generate entire paths that have trailing bytes different from b'' and b' '
 
 
-            # swap current and next
-            current_tags, next_tags = next_tags, current_tags
 
         tags.restart_generated()
 
