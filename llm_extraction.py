@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from explainable_dataset import ExplanationsDataset
+from utils.longembed import is_longembed, load_longembed
 
 
 
@@ -98,10 +99,17 @@ class VLLMGenerator:
     """
 
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
-                 tensor_parallel_size=1, dtype='auto', max_gen_tokens=2**16,
+                 tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
                  guided_json=False):
 
-        print("Initialized native vLLM offline generation client.")
+        # vLLM does not shard across GPUs on its own -- default to every visible
+        # GPU so the run uses two (or more) cards when they are available.
+        if tensor_parallel_size is None:
+            import torch
+            tensor_parallel_size = max(1, torch.cuda.device_count())
+
+        print(f"Initialized native vLLM offline generation client "
+              f"(tensor_parallel_size={tensor_parallel_size}).")
         self.model = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.llm = LLM(
@@ -130,9 +138,20 @@ class VLLMGenerator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            # Some chat templates (e.g. Gemma) reject a standalone system role;
+            # fall back to prepending the system text to the user turn.
+            merged = [{
+                "role": "user",
+                "content": f"{system_prompt}\n\n{user_prompt}",
+            }]
+            return self.tokenizer.apply_chat_template(
+                merged, tokenize=False, add_generation_prompt=True
+            )
 
     def generate(self, prompts):
         """Batched generation. ``prompts`` is a list of (system, user) pairs;
@@ -282,9 +301,14 @@ def sleep_with_progress(seconds, description=None):
 
 def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_config=None):
     """Load input records, deciding the source from ``input_name``:
-    a ``.json``/``.jsonl`` path is read from disk, anything else is treated as a
-    HuggingFace dataset id and loaded with ``datasets.load_dataset``."""
-    if input_name.endswith('.jsonl'):
+    the LongEmbed dataset gets its dedicated query/passage join, a
+    ``.json``/``.jsonl`` path is read from disk, and anything else is treated as
+    a HuggingFace dataset id loaded with ``datasets.load_dataset``."""
+    if is_longembed(input_name):
+        records = load_longembed()
+        end = to_sample if to_sample >= 0 else len(records)
+        return records[from_sample:end]
+    elif input_name.endswith('.jsonl'):
         with jsonlines.open(input_name, 'r') as f:
             return [
                 line_obj
@@ -645,8 +669,9 @@ def get_args():
                         help="Max sequence length for the vLLM engine (default: model config).")
     parser.add_argument('--vllm_gpu_memory_utilization', type=float, default=0.9,
                         help="Fraction of GPU memory vLLM may use.")
-    parser.add_argument('--vllm_tensor_parallel_size', type=int, default=1,
-                        help="Number of GPUs for tensor parallelism.")
+    parser.add_argument('--vllm_tensor_parallel_size', type=int, default=None,
+                        help="Number of GPUs for tensor parallelism "
+                             "(default: all visible GPUs).")
     parser.add_argument('--vllm_dtype', type=str, default='auto',
                         help="Model dtype for vLLM (e.g. auto, bfloat16, float16).")
     parser.add_argument('--max_gen_tokens', type=int, default=4096,
