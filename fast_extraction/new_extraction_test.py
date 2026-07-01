@@ -13,7 +13,7 @@ from jinja2 import Template
 from torch import newaxis, Tensor
 from torch.nn.utils.rnn import pad_sequence
 
-from find_BLO import TokenByteFinder
+from fast_extraction.find_BLO import TokenByteFinder
 from llm_runner import LLMRunner, get_model_config
 from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
     find_first_token, find_last_token
