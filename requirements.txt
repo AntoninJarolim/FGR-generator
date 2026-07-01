@@ -3,7 +3,13 @@ tqdm
 transformers
 jsonlines
 openai
+vllm
 Jinja2
 triton
 wandb
 datasets
+huggingface_hub
+matplotlib
+numpy
+pandas
+seaborn
