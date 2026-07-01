@@ -10,6 +10,7 @@ from jsonlines import jsonlines
 from openai import OpenAI
 from tqdm import tqdm
 from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 
 from explainable_dataset import ExplanationsDataset
 
@@ -24,12 +25,6 @@ class OpenAIGenerator:
                 base_url=url,
                 api_key=os.getenv(api_token_env_var, 'ollama'),
             )
-        elif generation_client == 'vllm':
-            print("Initialized VLLM generation client.")
-            self.client = OpenAI(
-                base_url=url,
-                api_key='EMPTY',
-            )
         else:
             self.client = OpenAI()
         self.model = model_name  # self.model = "gpt-4o-2024-08-06" "gpt-4o-mini"
@@ -41,27 +36,25 @@ class OpenAIGenerator:
         self.presence_penalty = 0
         self.system_message = "You are helpful linguistic specialist eager to complete given task."
 
-    def create_message(self, prompt):
+    def create_message(self, system_prompt, user_prompt):
         return [
             {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
                 "role": "user",
-                "content": prompt
+                "content": user_prompt
             }
         ]
 
-    def create_api_call_dict(self, message, from_prompt=True):
+    def create_api_call_dict(self, system_prompt, user_prompt):
         """
-        Create API call for OpenAI API
-        :param message: Prompt for the API call or message generated with create_message()
-        :param from_prompt: Use to transform user prompt to conversation format
-        :return:
+        Create API call for OpenAI API from a rendered (system, user) prompt pair.
         """
-        if from_prompt:
-            message = self.create_message(message)
-
         return dict(
             model=self.model,
-            messages=message,
+            messages=self.create_message(system_prompt, user_prompt),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             top_p=self.top_p,
@@ -72,14 +65,109 @@ class OpenAIGenerator:
             }
         )
 
-    def __call__(self, message):
-        api_dict = self.create_api_call_dict(message)
+    def __call__(self, system_prompt, user_prompt):
+        api_dict = self.create_api_call_dict(system_prompt, user_prompt)
         generation_result = self.client.chat.completions.create(**api_dict)
         return generation_result
 
 
-def create_message(template, **kwargs):
-    return template.render(**kwargs)
+# JSON schema for the {"spans": [...]} contract that the downstream parser
+# (utils/text_utils.find_spans / decode_one) expects: a list of verbatim
+# substring strings. Used for optional vLLM guided (constrained) decoding.
+SPANS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "spans": {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+    },
+    "required": ["spans"],
+}
+
+
+class VLLMGenerator:
+    """Native vLLM offline batched inference (LLM / SamplingParams).
+
+    Unlike OpenAIGenerator this needs no server: the model weights are loaded
+    in-process and a whole batch of prompts is generated in a single
+    ``llm.generate`` call. Its ``generate`` method returns the list of raw
+    message-content strings aligned to the input prompts, which
+    ``generate_one_batch_vllm`` then writes in the same output-file schema the
+    rest of the pipeline consumes.
+    """
+
+    def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
+                 tensor_parallel_size=1, dtype='auto', max_gen_tokens=2**16,
+                 guided_json=False):
+
+        print("Initialized native vLLM offline generation client.")
+        self.model = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.llm = LLM(
+            model=model_name,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tensor_parallel_size,
+            max_model_len=max_model_len,
+        )
+
+        # temperature=0 => greedy (deterministic) decoding.
+        sampling_kwargs = dict(
+            temperature=0.0,
+            max_tokens=max_gen_tokens,
+        )
+        if guided_json:
+            from vllm.sampling_params import GuidedDecodingParams
+            sampling_kwargs['guided_decoding'] = GuidedDecodingParams(
+                json=SPANS_JSON_SCHEMA
+            )
+            print("Enabled vLLM guided JSON decoding for the 'spans' schema.")
+        self.sampling_params = SamplingParams(**sampling_kwargs)
+
+    def _format_prompt(self, system_prompt, user_prompt):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+    def generate(self, prompts):
+        """Batched generation. ``prompts`` is a list of (system, user) pairs;
+        returns raw content strings aligned to it."""
+        formatted = [self._format_prompt(system, user) for system, user in prompts]
+        outputs = self.llm.generate(formatted, self.sampling_params)
+        return [output.outputs[0].text for output in outputs]
+
+
+def template_base_path(template_file):
+    """Strip a trailing ``.template`` and any ``-system``/``-user`` suffix to get
+    the shared base path, so that ``template_name.template``,
+    ``template_name-system.template`` and ``template_name-user.template`` all
+    resolve to the same base ``template_name``."""
+    return re.sub(r'(-system|-user)?\.template$', '', template_file)
+
+
+def read_system_user_templates(template_file):
+    """Always load BOTH the system and the user template for a given base.
+
+    Returns a ``(system_template, user_template)`` pair of jinja2 Templates.
+    Both files must exist -- there is no single-template fallback.
+    """
+    base = template_base_path(template_file)
+    with open(f"{base}-system.template", 'r') as f:
+        system_template = Template(f.read())
+    with open(f"{base}-user.template", 'r') as f:
+        user_template = Template(f.read())
+    return system_template, user_template
+
+
+def create_message(templates, **kwargs):
+    """Render the (system, user) template pair for one record."""
+    system_template, user_template = templates
+    return system_template.render(**kwargs), user_template.render(**kwargs)
 
 
 def task_from_prompt(custom_id, prompt):
@@ -92,8 +180,8 @@ def task_from_prompt(custom_id, prompt):
 
 
 def messages_for_passages(template, openai_api, **kwargs):
-    prompt_str = create_message(template, **kwargs)
-    api_message = openai_api.create_api_call_dict(prompt_str)
+    system_prompt, user_prompt = create_message(template, **kwargs)
+    api_message = openai_api.create_api_call_dict(system_prompt, user_prompt)
     return api_message
 
 
@@ -192,20 +280,26 @@ def sleep_with_progress(seconds, description=None):
         time.sleep(1)
 
 
-def read_input_data(file_path, from_sample, to_sample):
-    if file_path.endswith('.jsonl'):
-        with jsonlines.open(file_path, 'r') as f:
+def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_config=None):
+    """Load input records, deciding the source from ``input_name``:
+    a ``.json``/``.jsonl`` path is read from disk, anything else is treated as a
+    HuggingFace dataset id and loaded with ``datasets.load_dataset``."""
+    if input_name.endswith('.jsonl'):
+        with jsonlines.open(input_name, 'r') as f:
             return [
                 line_obj
                 for line_id, line_obj in enumerate(f)
                 if from_sample <= line_id < to_sample
             ]
-    elif file_path.endswith('.json'):
-        with open(file_path, 'r') as f:
+    elif input_name.endswith('.json'):
+        with open(input_name, 'r') as f:
             data = json.load(f)
             return data[from_sample:to_sample]
     else:
-        raise ValueError("Unsupported file format. Please use .json or .jsonl")
+        from datasets import load_dataset
+        dataset = load_dataset(input_name, hf_config, split=hf_split)
+        records = [dict(row) for row in dataset]
+        return records[from_sample:to_sample]
 
 
 def silent_remove(output_data_file):
@@ -284,8 +378,37 @@ def get_all_responses(generated_data_dir):
 def generate_one_batch(data_chunk, generation_api, jsonl_filename, generation_client, template):
     if generation_client == 'openai':
         generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, template)
+    elif generation_client == 'vllm':
+        generate_one_batch_vllm(data_chunk, generation_api, jsonl_filename, template)
     else:
         generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename, template)
+
+
+def write_batch_output(jsonl_filename, row_choices):
+    """Write ``(row_id, choice)`` pairs to ``<jsonl_filename>``'s ``*_output.jsonl``
+    counterpart in the schema ``process_output`` reads back
+    (``custom_id`` + ``response.body.choices[0]``). Shared by every online client."""
+    responses = [
+        {
+            'custom_id': f"row_{row_id}",
+            'response': {'body': {'choices': [choice]}},
+        }
+        for row_id, choice in row_choices
+    ]
+    out_filename = jsonl_filename.replace('.jsonl', '_output.jsonl')
+    with jsonlines.open(out_filename, mode='w') as writer:
+        writer.write_all(responses)
+
+
+def generate_one_batch_vllm(data_chunk, generation_api, jsonl_filename, template):
+    """Generate the whole chunk in a single batched vLLM call."""
+    row_ids = list(data_chunk.keys())
+    prompts = [create_message(template, **data_chunk[row_id]) for row_id in row_ids]
+    contents = generation_api.generate(prompts)
+    write_batch_output(jsonl_filename, (
+        (row_id, {'message': {'content': content}})
+        for row_id, content in zip(row_ids, contents)
+    ))
 
 
 def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, template):
@@ -302,24 +425,15 @@ def generate_one_batch_openai(data_chunk, generation_api, jsonl_filename, templa
 
 
 def generate_one_batch_ollama(data_chunk, generation_api, jsonl_filename, template):
-    responses = []
+    """Generate the chunk one record at a time against an OpenAI-compatible server."""
+    row_choices = []
     for row_id, record in tqdm(data_chunk.items(), desc="Generating batch"):
-        response = generation_api(create_message(template, **record))
+        response = generation_api(*create_message(template, **record))
         choice = dict(response.choices[0])
         choice['message'] = dict(choice['message'])
-        responses.append(
-            {
-                'custom_id': f"row_{row_id}",
-                'response': {
-                    'body': {
-                        'choices': [choice]
-                    }
-                }
-            }
-        )
-    out_filename = jsonl_filename.replace('.jsonl', '_output.jsonl')
-    with jsonlines.open(out_filename, mode='w') as writer:
-        writer.write_all(responses)
+        row_choices.append((row_id, choice))
+
+    write_batch_output(jsonl_filename, row_choices)
 
 
 def generate_all_batches(data_chunks, generation_api, generated_data_dir, generation_client, template):
@@ -480,16 +594,26 @@ def get_args():
     # Task args
     parser.add_argument("--skip_generation", action='store_true',
                         help="only processes each output file")
+    parser.add_argument("--skip-regeneration", dest="skip_regeneration", action='store_true',
+                        help="skip re-generating samples whose extracted spans are not found "
+                             "in the source text (still marks them with extraction_error)")
     parser.add_argument("--force_rewrite", action="store_true",
                         help="Disables the check for generating into existing directory.")
 
     # Data args
     parser.add_argument('--input_data_name', type=str, required=True,
-                        help="Filename to generate relevance extraction data.")
+                        help="Input source: a .json/.jsonl file path, or otherwise a "
+                             "HuggingFace dataset id (auto-detected from the value).")
+    parser.add_argument('--hf_split', type=str, default='train',
+                        help="Split to load when --input_data_name is a HuggingFace dataset.")
+    parser.add_argument('--hf_config', type=str, default=None,
+                        help="Config/subset name when --input_data_name is a HuggingFace dataset.")
     parser.add_argument('--generate_into_dir', type=str, default="data/generated",
                         help="Directory for storing raw LLM batch outputs and their fixes.")
-    parser.add_argument('--template_file', type=str, default='templates/ms-marco.template',
-                        help="Path to the prompt template file.")
+    parser.add_argument('--template_file', type=str, default='templates/long-embed.template',
+                        help="Base path to the prompt template. Both '<base>-system.template' "
+                             "and '<base>-user.template' are always loaded (e.g. "
+                             "templates/long-embed.template -> long-embed-system/user).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
 
@@ -509,10 +633,26 @@ def get_args():
     # Generation API args
     parser.add_argument("--generation_client", type=str, choices=['ollama', 'vllm', 'openai'], default='ollama',
                         help="Specify which generation client should be used. "
-                             "Available: 'ollama', 'vllm', 'openai'")
+                             "'vllm' = native offline batched inference (no server, needs a GPU); "
+                             "'ollama' = OpenAI-compatible server at OPENAI_BASE_URL; "
+                             "'openai' = hosted OpenAI Batch API.")
     parser.add_argument('--api_token_env_var', type=str,
                         default='E_INFRA_API_TOKEN',
                         help='API token for E_INFRA')
+
+    # Native vLLM offline-inference args (only used with --generation_client vllm)
+    parser.add_argument('--vllm_max_model_len', type=int, default=None,
+                        help="Max sequence length for the vLLM engine (default: model config).")
+    parser.add_argument('--vllm_gpu_memory_utilization', type=float, default=0.9,
+                        help="Fraction of GPU memory vLLM may use.")
+    parser.add_argument('--vllm_tensor_parallel_size', type=int, default=1,
+                        help="Number of GPUs for tensor parallelism.")
+    parser.add_argument('--vllm_dtype', type=str, default='auto',
+                        help="Model dtype for vLLM (e.g. auto, bfloat16, float16).")
+    parser.add_argument('--max_gen_tokens', type=int, default=4096,
+                        help="Max tokens to generate per sample (vLLM offline path).")
+    parser.add_argument('--vllm_guided_json', action='store_true',
+                        help="Constrain vLLM output to the {'spans': [str, ...]} JSON schema.")
 
     return parser.parse_args()
 
@@ -522,23 +662,35 @@ def main():
 
     # Prepare API
     if not args.skip_generation:
-        generation_api = OpenAIGenerator(
-            args.model_name,
-            generation_client=args.generation_client,
-            api_token_env_var=args.api_token_env_var
-        )
+        if args.generation_client == 'vllm':
+            generation_api = VLLMGenerator(
+                args.model_name,
+                max_model_len=args.vllm_max_model_len,
+                gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                tensor_parallel_size=args.vllm_tensor_parallel_size,
+                dtype=args.vllm_dtype,
+                max_gen_tokens=args.max_gen_tokens,
+                guided_json=args.vllm_guided_json,
+            )
+        else:
+            generation_api = OpenAIGenerator(
+                args.model_name,
+                generation_client=args.generation_client,
+                api_token_env_var=args.api_token_env_var
+            )
 
     else:
         generation_api = None
 
-    with open(args.template_file, 'r') as f:
-        template = Template(f.read())
+    # Always load both the system and the user template for this base.
+    template = read_system_user_templates(args.template_file)
 
     # Read input data
-    input_data = read_input_data(args.input_data_name, args.from_sample, args.to_sample)
+    input_data = read_input_data(args.input_data_name, args.from_sample, args.to_sample,
+                                 hf_split=args.hf_split, hf_config=args.hf_config)
 
     # Prepare out data file
-    template_name = os.path.basename(args.template_file).replace('.template', '')
+    template_name = os.path.basename(template_base_path(args.template_file))
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, template_name, batch_dir)
@@ -566,56 +718,57 @@ def main():
     fix_dirs = find_sorted_fix_dirs(generated_data_dir)
     last_fix = 0
     invalid_samples = None
-    for fix_dir in fix_dirs:
-        invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
-        print(f"{last_fix} fixes applied, {len(invalid_samples)} were marked as invalid in the output dataset before exiting")
+    if not args.skip_regeneration:
+        for fix_dir in fix_dirs:
+            invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
+            print(f"{last_fix} fixes applied, {len(invalid_samples)} were marked as invalid in the output dataset before exiting")
 
-        responses_out = get_all_responses(fix_dir)
-        # assert sorted(list(responses_out.keys())) == sorted(invalid_samples)
-        update_output_spans(responses_out, output_data_file)
-        last_fix += 1
+            responses_out = get_all_responses(fix_dir)
+            # assert sorted(list(responses_out.keys())) == sorted(invalid_samples)
+            update_output_spans(responses_out, output_data_file)
+            last_fix += 1
 
-    print(f"Found {last_fix} fix files.")
+        print(f"Found {last_fix} fix files.")
 
-    invalid_samples_history = []
-    max_regenerate_count = 5
-    while (not args.skip_generation
-           and (invalid_len := len(
-                invalid_samples := find_invalid_samples(output_data_file, invalid_samples, args.psg_key))) > 0):
-        print(f"Version after {last_fix} fixes has {invalid_len} invalid samples. "
-              f"Trying to fix following indexes.")
-        print(invalid_samples)
+        invalid_samples_history = []
+        max_regenerate_count = 5
+        while (not args.skip_generation
+               and (invalid_len := len(
+                    invalid_samples := find_invalid_samples(output_data_file, invalid_samples, args.psg_key))) > 0):
+            print(f"Version after {last_fix} fixes has {invalid_len} invalid samples. "
+                  f"Trying to fix following indexes.")
+            print(invalid_samples)
 
-        fix_data_dir = os.path.join(generated_data_dir, f"fix_{last_fix}")
-        os.makedirs(fix_data_dir)
-        # get chunks of data but only for invalid indexes
-        invalid_data_chunks = [
-            {invalid_id: input_data[invalid_id] for invalid_id in invalid_samples[i:i + args.batch_size]}
-            for i in range(0, len(invalid_samples), args.batch_size)
-        ]
-        generate_all_batches_fix(invalid_data_chunks,
-                                 generation_api,
-                                 fix_data_dir,
-                                 args.generation_client,
-                                 template
-                                 )
+            fix_data_dir = os.path.join(generated_data_dir, f"fix_{last_fix}")
+            os.makedirs(fix_data_dir)
+            # get chunks of data but only for invalid indexes
+            invalid_data_chunks = [
+                {invalid_id: input_data[invalid_id] for invalid_id in invalid_samples[i:i + args.batch_size]}
+                for i in range(0, len(invalid_samples), args.batch_size)
+            ]
+            generate_all_batches_fix(invalid_data_chunks,
+                                     generation_api,
+                                     fix_data_dir,
+                                     args.generation_client,
+                                     template
+                                     )
 
-        # Update final output file with generated fixes
-        responses_out = get_all_responses(fix_data_dir)
-        update_output_spans(responses_out, output_data_file)
-        last_fix += 1
+            # Update final output file with generated fixes
+            responses_out = get_all_responses(fix_data_dir)
+            update_output_spans(responses_out, output_data_file)
+            last_fix += 1
 
-        # Exit loop if N numbers of tries did not improve dataset
-        invalid_samples_history.append(invalid_len)
-        if not dataset_improved(invalid_samples_history, max_regenerate_count, invalid_len):
-            print(f"Exiting because the count of invalid samples "
-                  f"was not changed in last {max_regenerate_count} iterations.")
-            break
+            # Exit loop if N numbers of tries did not improve dataset
+            invalid_samples_history.append(invalid_len)
+            if not dataset_improved(invalid_samples_history, max_regenerate_count, invalid_len):
+                print(f"Exiting because the count of invalid samples "
+                      f"was not changed in last {max_regenerate_count} iterations.")
+                break
 
-        # Negative = unlimited
-        if 0 < args.max_fixes <= last_fix:
-            print(f"Exiting because maximum number of fixes reached ({args.max_fixes}).")
-            break
+            # Negative = unlimited
+            if 0 < args.max_fixes <= last_fix:
+                print(f"Exiting because maximum number of fixes reached ({args.max_fixes}).")
+                break
 
     invalid_samples = find_invalid_samples(output_data_file, invalid_samples, args.psg_key)
     annotate_failed_extraction(output_data_file, invalid_samples)
