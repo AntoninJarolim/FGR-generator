@@ -198,32 +198,53 @@ class VLLMGenerator:
         (keeping the instructions and query intact) so the formatted prompt plus
         the generation budget fits inside ``max_model_len``. Long documents that
         would otherwise abort the whole run with a context-length error are cut
-        down here instead."""
-        system, user = create_message(template, **record)
-        if not self.max_model_len:
-            return system, user
+        down here instead.
 
-        budget = self.max_model_len - self.max_gen_tokens - self.TRUNC_MARGIN
-        n = self._ntokens(self._format_prompt(system, user))
-        if n <= budget or self.psg_key not in record:
-            return system, user
+        Returns ``(system, user, meta)`` where ``meta`` carries per-sample token
+        stats for the output dataset:
+          - ``was_truncated``:            whether the passage was cut to fit
+          - ``document_tokens``:          passage token count before truncation
+          - ``document_tokens_truncated``: passage token count actually sent
+          - ``prompt_tokens``:            full formatted prompt (instructions +
+                                          query + passage) token count sent
+        These reuse the tokenization we already do here, so they add no
+        meaningful cost to generation.
+        """
+        system, user = create_message(template, **record)
+        prompt_tokens = self._ntokens(self._format_prompt(system, user))
+
+        has_psg = self.psg_key in record
+        psg_ids = (self.tokenizer(record[self.psg_key], add_special_tokens=False)["input_ids"]
+                   if has_psg else [])
+        doc_tokens_full = len(psg_ids) if has_psg else None
+
+        def meta(was_truncated, doc_tokens_sent):
+            return {
+                "was_truncated": was_truncated,
+                "document_tokens": doc_tokens_full,
+                "document_tokens_truncated": doc_tokens_sent,
+                "prompt_tokens": prompt_tokens,
+            }
+
+        budget = (self.max_model_len - self.max_gen_tokens - self.TRUNC_MARGIN
+                  if self.max_model_len else None)
+        if budget is None or prompt_tokens <= budget or not has_psg:
+            return system, user, meta(False, doc_tokens_full)
 
         # Trim the passage token count by (overflow + margin), then re-render and
         # re-check a few times to converge despite tokenizer boundary effects.
-        psg_ids = self.tokenizer(record[self.psg_key], add_special_tokens=False)["input_ids"]
-        original = len(psg_ids)
-        keep = max(0, original - (n - budget) - self.TRUNC_MARGIN)
+        keep = max(0, doc_tokens_full - (prompt_tokens - budget) - self.TRUNC_MARGIN)
         for _ in range(5):
             trimmed = dict(record)
             trimmed[self.psg_key] = self.tokenizer.decode(psg_ids[:keep])
             system, user = create_message(template, **trimmed)
-            n = self._ntokens(self._format_prompt(system, user))
-            if n <= budget or keep <= 0:
+            prompt_tokens = self._ntokens(self._format_prompt(system, user))
+            if prompt_tokens <= budget or keep <= 0:
                 break
-            keep = max(0, keep - (n - budget) - self.TRUNC_MARGIN)
+            keep = max(0, keep - (prompt_tokens - budget) - self.TRUNC_MARGIN)
 
         self._n_truncated += 1
-        return system, user
+        return system, user, meta(True, keep)
 
     def generate(self, prompts):
         """Batched generation. ``prompts`` is a list of (system, user) pairs;
@@ -500,8 +521,15 @@ def generate_one_batch_vllm(data_chunk, generation_api, jsonl_filename, template
     """Generate the whole chunk in a single batched vLLM call."""
     row_ids = list(data_chunk.keys())
     # fit_prompt truncates over-long passages so a single long document can't
-    # abort the batch with a context-length error.
-    prompts = [generation_api.fit_prompt(template, data_chunk[row_id]) for row_id in row_ids]
+    # abort the batch with a context-length error, and reports per-sample token
+    # stats. We stash those stats on the input record itself: it is the same
+    # object write_output later splats into the final row (see create_minibatch),
+    # so was_truncated / *_tokens land in the output dataset with no extra pass.
+    prompts = []
+    for row_id in row_ids:
+        system, user, meta = generation_api.fit_prompt(template, data_chunk[row_id])
+        prompts.append((system, user))
+        data_chunk[row_id].update(meta)
     contents = generation_api.generate(prompts)
     write_batch_output(jsonl_filename, (
         (row_id, {'message': {'content': content}})
