@@ -98,9 +98,13 @@ class VLLMGenerator:
     rest of the pipeline consumes.
     """
 
+    # Tokens held back below max_model_len when fitting a prompt, to absorb
+    # chat-template special tokens and tokenizer boundary effects
+    TRUNC_MARGIN = 256
+
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
-                 guided_json=False):
+                 guided_json=False, psg_key='passage'):
 
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
@@ -111,6 +115,9 @@ class VLLMGenerator:
         print(f"Initialized native vLLM offline generation client "
               f"(tensor_parallel_size={tensor_parallel_size}).")
         self.model = model_name
+        self.max_gen_tokens = max_gen_tokens
+        self.psg_key = psg_key
+        self._n_truncated = 0
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.llm = LLM(
             model=model_name,
@@ -119,6 +126,11 @@ class VLLMGenerator:
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
         )
+        # Use the context length the engine actually settled on (it may cap the
+        # requested value to what fits in the KV cache), so passage truncation
+        # targets the real limit rather than our request.
+        self.max_model_len = self._resolve_max_model_len(max_model_len)
+        print(f"Effective max_model_len for prompt fitting: {self.max_model_len}")
 
         # temperature=0 => greedy (deterministic) decoding.
         sampling_kwargs = dict(
@@ -126,10 +138,19 @@ class VLLMGenerator:
             max_tokens=max_gen_tokens,
         )
         if guided_json:
-            from vllm.sampling_params import GuidedDecodingParams
-            sampling_kwargs['guided_decoding'] = GuidedDecodingParams(
-                json=SPANS_JSON_SCHEMA
-            )
+            # vLLM >=0.24 renamed GuidedDecodingParams -> StructuredOutputsParams
+            # and the SamplingParams field guided_decoding -> structured_outputs.
+            # Prefer the new API, fall back to the old for older vLLM.
+            try:
+                from vllm.sampling_params import StructuredOutputsParams
+                sampling_kwargs['structured_outputs'] = StructuredOutputsParams(
+                    json=SPANS_JSON_SCHEMA
+                )
+            except ImportError:
+                from vllm.sampling_params import GuidedDecodingParams
+                sampling_kwargs['guided_decoding'] = GuidedDecodingParams(
+                    json=SPANS_JSON_SCHEMA
+                )
             print("Enabled vLLM guided JSON decoding for the 'spans' schema.")
         self.sampling_params = SamplingParams(**sampling_kwargs)
 
@@ -152,6 +173,57 @@ class VLLMGenerator:
             return self.tokenizer.apply_chat_template(
                 merged, tokenize=False, add_generation_prompt=True
             )
+
+    def _resolve_max_model_len(self, fallback):
+        """Read the context length the vLLM engine actually uses (it can cap the
+        requested value). Fall back to the requested value if the attribute path
+        differs across vLLM versions."""
+        for accessor in (
+            lambda: self.llm.llm_engine.model_config.max_model_len,
+            lambda: self.llm.llm_engine.vllm_config.model_config.max_model_len,
+        ):
+            try:
+                value = accessor()
+                if value:
+                    return int(value)
+            except Exception:
+                pass
+        return fallback
+
+    def _ntokens(self, formatted_prompt):
+        return len(self.tokenizer(formatted_prompt, add_special_tokens=False)["input_ids"])
+
+    def fit_prompt(self, template, record):
+        """Render ``(system, user)`` for one record, truncating ONLY the passage
+        (keeping the instructions and query intact) so the formatted prompt plus
+        the generation budget fits inside ``max_model_len``. Long documents that
+        would otherwise abort the whole run with a context-length error are cut
+        down here instead."""
+        system, user = create_message(template, **record)
+        if not self.max_model_len:
+            return system, user
+
+        budget = self.max_model_len - self.max_gen_tokens - self.TRUNC_MARGIN
+        n = self._ntokens(self._format_prompt(system, user))
+        if n <= budget or self.psg_key not in record:
+            return system, user
+
+        # Trim the passage token count by (overflow + margin), then re-render and
+        # re-check a few times to converge despite tokenizer boundary effects.
+        psg_ids = self.tokenizer(record[self.psg_key], add_special_tokens=False)["input_ids"]
+        original = len(psg_ids)
+        keep = max(0, original - (n - budget) - self.TRUNC_MARGIN)
+        for _ in range(5):
+            trimmed = dict(record)
+            trimmed[self.psg_key] = self.tokenizer.decode(psg_ids[:keep])
+            system, user = create_message(template, **trimmed)
+            n = self._ntokens(self._format_prompt(system, user))
+            if n <= budget or keep <= 0:
+                break
+            keep = max(0, keep - (n - budget) - self.TRUNC_MARGIN)
+
+        self._n_truncated += 1
+        return system, user
 
     def generate(self, prompts):
         """Batched generation. ``prompts`` is a list of (system, user) pairs;
@@ -427,7 +499,9 @@ def write_batch_output(jsonl_filename, row_choices):
 def generate_one_batch_vllm(data_chunk, generation_api, jsonl_filename, template):
     """Generate the whole chunk in a single batched vLLM call."""
     row_ids = list(data_chunk.keys())
-    prompts = [create_message(template, **data_chunk[row_id]) for row_id in row_ids]
+    # fit_prompt truncates over-long passages so a single long document can't
+    # abort the batch with a context-length error.
+    prompts = [generation_api.fit_prompt(template, data_chunk[row_id]) for row_id in row_ids]
     contents = generation_api.generate(prompts)
     write_batch_output(jsonl_filename, (
         (row_id, {'message': {'content': content}})
@@ -696,6 +770,7 @@ def main():
                 dtype=args.vllm_dtype,
                 max_gen_tokens=args.max_gen_tokens,
                 guided_json=args.vllm_guided_json,
+                psg_key=args.psg_key,
             )
         else:
             generation_api = OpenAIGenerator(
