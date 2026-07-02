@@ -20,15 +20,13 @@ LONGEMBED_DATASET_ID = "dwzhu/LongEmbed"
 # passkey / needle are synthetic recall probes -- excluded on purpose.
 NON_SYNTHETIC_SUBSETS = ["narrativeqa", "summ_screen_fd", "qmsum", "2wikimqa"]
 
-DEFAULT_SAMPLES_PER_SUBSET = 100
-
 
 def is_longembed(input_name):
     """True when ``input_name`` refers to the LongEmbed dataset."""
     return "longembed" in input_name.lower()
 
 
-def build_pairs(corpus_rows, queries_rows, qrels_rows, subset, limit=None):
+def build_pairs(corpus_rows, queries_rows, qrels_rows, subset):
     """Join already-loaded split rows into flat (query, passage) records.
 
     Kept free of any ``datasets`` dependency so the join logic is unit-testable
@@ -50,16 +48,13 @@ def build_pairs(corpus_rows, queries_rows, qrels_rows, subset, limit=None):
             "qid": qid,
             "doc_id": doc_id,
         })
-        if limit is not None and len(records) >= limit:
-            break
     return records
 
 
-def load_longembed(subsets=None, samples_per_subset=DEFAULT_SAMPLES_PER_SUBSET):
+def load_longembed(subsets=None):
     """Download the LongEmbed splits and return the joined records.
 
     :param subsets: subset names to load (defaults to the non-synthetic ones).
-    :param samples_per_subset: cap on records emitted per subset.
     """
     from datasets import load_dataset
 
@@ -72,9 +67,7 @@ def load_longembed(subsets=None, samples_per_subset=DEFAULT_SAMPLES_PER_SUBSET):
         queries_rows = load_dataset(LONGEMBED_DATASET_ID, subset, split="queries")
         qrels_rows = load_dataset(LONGEMBED_DATASET_ID, subset, split="qrels")
 
-        subset_records = build_pairs(
-            corpus_rows, queries_rows, qrels_rows, subset, limit=samples_per_subset
-        )
+        subset_records = build_pairs(corpus_rows, queries_rows, qrels_rows, subset)
         print(f"LongEmbed[{subset}]: {len(subset_records)} query-passage pairs")
         records.extend(subset_records)
 
