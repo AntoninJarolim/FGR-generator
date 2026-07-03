@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FGR viewer</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #dcdfe4; --text: #1c2128;
+    --muted: #6b7280; --accent: #2563eb; --warn: #b45309; --bad: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 14px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  header label { color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+  header input[type=number] { width: 64px; padding: 2px 4px; }
+  kbd {
+    background: #eef0f3; border: 1px solid var(--border); border-radius: 3px;
+    padding: 0 4px; font-size: 11px; color: var(--muted);
+  }
+  #models { display: flex; gap: 6px; flex-wrap: wrap; }
+  .model-chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+    border: 1px solid var(--border); border-radius: 14px; cursor: pointer;
+    background: #fafbfc; user-select: none; white-space: nowrap;
+  }
+  .model-chip.on { background: #e4edff; border-color: var(--accent); color: #1e3a8a; }
+  .model-chip.primary { box-shadow: inset 0 0 0 1px var(--accent); }
+  .model-chip small { color: var(--muted); }
+
+  #app { display: flex; flex: 1; min-height: 0; }
+  aside {
+    width: 330px; min-width: 330px; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border); background: var(--card);
+  }
+  #filters { padding: 8px; display: grid; gap: 6px; border-bottom: 1px solid var(--border); }
+  #filters input, #filters select { padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px; width: 100%; }
+  #count { padding: 4px 10px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  #list { flex: 1; overflow-y: auto; }
+  .row { padding: 7px 10px; border-bottom: 1px solid #eef0f3; cursor: pointer; }
+  .row:hover { background: #f6f8fb; }
+  .row.sel { background: #e4edff; }
+  .row .meta { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .row .q { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  #more { margin: 8px; padding: 6px; }
+
+  .badge {
+    display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px;
+    line-height: 17px; background: #eef0f3; color: var(--muted); white-space: nowrap;
+  }
+  .badge.trunc { background: #fef3c7; color: var(--warn); }
+  .badge.miss { background: #fee2e2; color: var(--bad); }
+  .badge.empty { background: #e5e7eb; color: #374151; }
+  .badge.ok { background: #dcfce7; color: #15803d; }
+
+  /* Only the passage area (#cols) scrolls; header, query card and each
+     column's title/stats/spans stay pinned so they are always interactable. */
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 12px; }
+  #recHeader { flex-shrink: 0; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+  #recHeader .queryLabel { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  #recHeader .query { font-size: 15px; font-weight: 600; margin: 2px 0 6px; }
+  #recHeader .ids { color: var(--muted); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+
+  #cols { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 12px; grid-template-columns: repeat(var(--ncols, 1), minmax(340px, 1fr)); align-items: start; }
+  .col { background: var(--card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
+  .colTop { position: sticky; top: 0; z-index: 5; background: var(--card); border-radius: 8px 8px 0 0; box-shadow: 0 2px 4px rgba(0,0,0,.05); }
+  .colTop .colHead { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .col .colTitle { font-weight: 600; margin-bottom: 4px; word-break: break-all; }
+  .col .stats { display: flex; gap: 5px; flex-wrap: wrap; }
+  .col .spans { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 5px; max-height: 26vh; overflow-y: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+    padding: 2px 8px; border-radius: 11px; font-size: 12px; cursor: pointer; border: 1px solid transparent;
+  }
+  .chip .t { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip.nf { background: #fee2e2; color: var(--bad); cursor: default; }
+  .passage {
+    padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6;
+  }
+  mark { border-radius: 3px; padding: 0 1px; }
+  mark.fuzzy { text-decoration: underline dashed 1.5px rgba(0,0,0,.45); }
+  mark.approx { text-decoration: underline dotted 2px rgba(0,0,0,.55); box-shadow: inset 0 0 0 1px rgba(0,0,0,.22); opacity: .85; }
+  mark.flash { outline: 2px solid var(--accent); }
+  .c0 { background: #fde68a; } .c1 { background: #bbf7d0; } .c2 { background: #bfdbfe; } .c3 { background: #fbcfe8; }
+  .c4 { background: #ddd6fe; } .c5 { background: #fed7aa; } .c6 { background: #99f6e4; } .c7 { background: #e9d5ff; }
+  .gap {
+    display: block; text-align: center; margin: 6px 0; padding: 3px; cursor: pointer;
+    color: var(--accent); background: #f1f5fd; border: 1px dashed #c3d4f7; border-radius: 5px;
+    font-family: inherit; font-size: 12px; user-select: none;
+  }
+  .gap:hover { background: #e4edff; }
+  .missing { padding: 24px; color: var(--muted); text-align: center; }
+  #placeholder { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FGR viewer</h1>
+  <div id="models"></div>
+  <div class="spacer"></div>
+  <label><input type="checkbox" id="fullText"> full text <kbd>f</kbd></label>
+  <label>context <input type="number" id="ctxSize" value="300" min="50" step="50"></label>
+  <span style="color:var(--muted)"><kbd>j</kbd>/<kbd>k</kbd> prev/next record · <kbd>n</kbd>/<kbd>p</kbd> next/prev span</span>
+</header>
+<div id="app">
+  <aside>
+    <div id="filters">
+      <input id="search" placeholder="search in query text…">
+      <select id="subset"><option value="">all subsets</option></select>
+      <select id="flag">
+        <option value="">all records</option>
+        <option value="truncated">truncated documents</option>
+        <option value="nonverbatim">has non-verbatim spans</option>
+        <option value="empty">no spans extracted</option>
+      </select>
+    </div>
+    <div id="count"></div>
+    <div id="list"></div>
+    <button id="more" hidden>load more</button>
+  </aside>
+  <main>
+    <div id="placeholder">Select a record on the left. Models can be toggled in the header;<br>
+      the first enabled model drives the record list, others join by (subset, qid, doc_id).</div>
+    <div id="recHeader" hidden></div>
+    <div id="cols"></div>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const fmt = n => n.toLocaleString("en-US");
+const api = async (path, params) => {
+  const url = path + "?" + new URLSearchParams(params);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+  return res.json();
+};
+
+const S = {
+  files: [], selected: [],            // selected file names, [0] is primary
+  items: [], total: 0, curIdx: null,  // record list state (indexes into primary file)
+  fullText: false, ctx: 300,
+  markCursor: -1,                     // n/p span-navigation position
+};
+const filters = () => ({ q: $("search").value, subset: $("subset").value, flag: $("flag").value });
+const shortName = f => (f.startsWith("live:") ? "⏳ " : "") + f.replace(/^live:/, "").replace(/^.*\//, "").replace(/\.jsonl$/, "");
+
+// ---------- model selection ----------
+async function loadFiles() {
+  S.files = (await api("/api/files", {})).files;
+  if (!S.selected.length && S.files.length) S.selected = [S.files[0].name];
+  S.selected = S.selected.filter(n => S.files.some(f => f.name === n));
+  renderModels();
+}
+function renderModels() {
+  $("models").innerHTML = "";
+  for (const f of S.files) {
+    const on = S.selected.includes(f.name);
+    const div = document.createElement("span");
+    div.className = "model-chip" + (on ? " on" : "") + (S.selected[0] === f.name ? " primary" : "");
+    div.innerHTML = `${esc(shortName(f.name))} <small>${(f.size / 1e6).toFixed(0)}MB${f.rows != null ? " · " + fmt(f.rows) : ""}</small>`;
+    div.title = f.name + (S.selected[0] === f.name ? " (primary: drives the record list)" : "");
+    div.onclick = () => {
+      const i = S.selected.indexOf(f.name);
+      if (i >= 0) S.selected.splice(i, 1); else S.selected.push(f.name);
+      renderModels();
+      if (i === 0) resetList();          // primary changed
+      else if (S.curIdx != null) openRecord(S.curIdx);  // just add/remove a column
+    };
+    $("models").appendChild(div);
+  }
+}
+
+// ---------- record list ----------
+async function resetList() {
+  S.items = []; S.total = 0; S.curIdx = null;
+  $("list").innerHTML = ""; $("recHeader").hidden = true; $("cols").innerHTML = "";
+  $("placeholder").hidden = false;
+  if (!S.selected.length) { $("count").textContent = "no model selected"; return; }
+  $("count").textContent = "indexing / loading…";
+  try {
+    const meta = await api("/api/filemeta", { file: S.selected[0] });
+    const cur = $("subset").value;
+    $("subset").innerHTML = '<option value="">all subsets</option>' +
+      meta.subsets.map(s => `<option${s === cur ? " selected" : ""}>${esc(s)}</option>`).join("");
+    await loadMore();
+  } catch (e) { $("count").textContent = "error: " + e.message; }
+}
+async function loadMore() {
+  const data = await api("/api/records", { file: S.selected[0], offset: S.items.length, limit: 200, ...filters() });
+  S.total = data.total;
+  for (const it of data.items) {
+    S.items.push(it);
+    const row = document.createElement("div");
+    row.className = "row"; row.dataset.idx = it.idx;
+    const badges = [];
+    if (it.was_truncated) badges.push('<span class="badge trunc">truncated</span>');
+    if (it.n_spans === 0) badges.push('<span class="badge empty">no spans</span>');
+    else if (it.n_exact < it.n_spans) badges.push(`<span class="badge miss">${it.n_spans - it.n_exact} non-verbatim</span>`);
+    row.innerHTML = `<div class="meta">#${it.idx} · ${esc(it.subset || "?")} ${badges.join(" ")}</div>
+                     <div class="q">${esc(it.query)}</div>`;
+    row.onclick = () => openRecord(it.idx);
+    $("list").appendChild(row);
+  }
+  $("count").textContent = `${fmt(S.items.length)} of ${fmt(S.total)} records`;
+  $("more").hidden = S.items.length >= S.total;
+}
+$("more").onclick = loadMore;
+let searchTimer;
+$("search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(resetList, 300); };
+$("subset").onchange = $("flag").onchange = resetList;
+
+// ---------- span matching ----------
+const NORM = { "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", " ": " " };
+function normalizeWithMap(text) {
+  const out = [], map = [];
+  let lastSpace = true;
+  for (let i = 0; i < text.length; i++) {
+    let c = NORM[text[i]] || text[i].toLowerCase();
+    if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v") {
+      if (lastSpace) continue;
+      out.push(" "); map.push(i); lastSpace = true;
+    } else { out.push(c); map.push(i); lastSpace = false; }
+  }
+  return { norm: out.join(""), map };
+}
+// Tier-3 approximate matching: allow up to APPROX_RATE of the span's length in
+// edits (insert/delete/substitute; min 2). Viewer-only aid for locating the
+// region a non-verbatim span came from -- it does NOT change the run's own
+// verbatim validity check.
+const APPROX_RATE = 0.05;
+
+function alignWindow(win, pat) {
+  // Semi-global Levenshtein: the pattern must align fully, the window's start
+  // and end are free. Returns best {err, start, end} of the aligned region.
+  const n = win.length, m = pat.length;
+  let prevD = new Int32Array(n + 1), prevS = new Int32Array(n + 1);
+  let curD = new Int32Array(n + 1), curS = new Int32Array(n + 1);
+  for (let j = 0; j <= n; j++) prevS[j] = j;            // D[0][j] = 0, start=j
+  for (let i = 1; i <= m; i++) {
+    curD[0] = i; curS[0] = 0;
+    const pc = pat.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) {
+      let d = prevD[j - 1] + (win.charCodeAt(j - 1) === pc ? 0 : 1), s = prevS[j - 1];
+      if (prevD[j] + 1 < d) { d = prevD[j] + 1; s = prevS[j]; }      // skip pattern char
+      if (curD[j - 1] + 1 < d) { d = curD[j - 1] + 1; s = curS[j - 1]; }  // skip window char
+      curD[j] = d; curS[j] = s;
+    }
+    [prevD, curD] = [curD, prevD]; [prevS, curS] = [curS, prevS];
+  }
+  let err = Infinity, end = -1, start = 0;
+  for (let j = 0; j <= n; j++) if (prevD[j] < err) { err = prevD[j]; end = j; start = prevS[j]; }
+  return { err, start, end };
+}
+
+function approxFind(normedText, ns) {
+  // Anchor-and-verify: split the span into maxErr+1 pieces (pigeonhole: with
+  // <= maxErr edits at least one piece survives verbatim), find candidate
+  // windows around each piece hit, then align the whole span in each window.
+  if (ns.length < 8) return null;
+  const maxErr = Math.max(2, Math.round(ns.length * APPROX_RATE));
+  const text = normedText.norm;
+  let pieces = maxErr + 1, pieceLen = Math.ceil(ns.length / pieces);
+  if (pieceLen < 4) { pieces = Math.floor(ns.length / 4); pieceLen = Math.ceil(ns.length / pieces); }
+  const starts = new Set();
+  for (let p = 0; p < pieces && starts.size < 60; p++) {
+    const off = p * pieceLen;
+    const piece = ns.substr(off, pieceLen);
+    let from = 0, pos, hits = 0;
+    while (piece && (pos = text.indexOf(piece, from)) !== -1 && hits < 50) {
+      const ws = Math.max(0, pos - off - maxErr - 2);
+      starts.add(Math.floor(ws / 16) * 16);   // quantize to dedupe near-identical windows
+      from = pos + 1; hits++;
+    }
+  }
+  let best = null;
+  const wLen = ns.length + 2 * (maxErr + 2);
+  for (const ws of starts) {
+    const r = alignWindow(text.substr(ws, wLen), ns);
+    if (r.err <= maxErr && (!best || r.err < best.err))
+      best = { err: r.err, start: ws + r.start, end: ws + r.end };
+  }
+  return best && best.end > best.start ? best : null;
+}
+
+const KIND_RANK = { exact: 3, fuzzy: 2, approx: 1 };
+
+function analyze(passage, spans) {
+  // Per span, in order: exact indexOf occurrences; one conservative normalized
+  // (whitespace/quote/case) match; one approximate <=5%-edits match; else "not
+  // found". Returns non-overlapping merged ranges + per-span status objects.
+  const ranges = [], status = [];
+  let normed = null;
+  spans.forEach((s, i) => {
+    if (!s) { status.push({ kind: "nf" }); return; }
+    let found = false, from = 0, pos;
+    while ((pos = passage.indexOf(s, from)) !== -1 && ranges.length < 5000) {
+      ranges.push({ start: pos, end: pos + s.length, span: i, kind: "exact" });
+      from = pos + s.length; found = true;
+    }
+    if (found) { status.push({ kind: "exact" }); return; }
+    normed = normed || normalizeWithMap(passage);
+    const ns = normalizeWithMap(s).norm.trim();
+    if (ns) {
+      const p = normed.norm.indexOf(ns);
+      if (p !== -1) {
+        ranges.push({ start: normed.map[p], end: normed.map[p + ns.length - 1] + 1, span: i, kind: "fuzzy" });
+        status.push({ kind: "fuzzy" }); return;
+      }
+      const a = approxFind(normed, ns);
+      if (a) {
+        ranges.push({ start: normed.map[a.start], end: normed.map[a.end - 1] + 1, span: i, kind: "approx" });
+        status.push({ kind: "approx", err: a.err, rate: a.err / ns.length }); return;
+      }
+    }
+    status.push({ kind: "nf" });
+  });
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r.start < last.end) {
+      last.end = Math.max(last.end, r.end);
+      last.spans.add(r.span);
+      if (KIND_RANK[r.kind] > KIND_RANK[last.kind]) last.kind = r.kind;
+    } else merged.push({ start: r.start, end: r.end, spans: new Set([r.span]), kind: r.kind });
+  }
+  return { merged, status };
+}
+
+// ---------- passage rendering ----------
+function renderSlice(passage, merged, a, b) {
+  let html = "", pos = a;
+  for (const m of merged) {
+    if (m.end <= a) continue;
+    if (m.start >= b) break;
+    const s = Math.max(m.start, a), e = Math.min(m.end, b);
+    if (s > pos) html += esc(passage.slice(pos, s));
+    const ids = [...m.spans];
+    html += `<mark class="c${ids[0] % 8}${m.kind === "exact" ? "" : " " + m.kind}" data-s="${ids.join(" ")}">` + esc(passage.slice(s, e)) + "</mark>";
+    pos = e;
+  }
+  if (pos < b) html += esc(passage.slice(pos, b));
+  return html;
+}
+function renderPassage(el, passage, merged) {
+  if (S.fullText || !merged.length) {
+    const limit = merged.length ? passage.length : Math.min(passage.length, 3000);
+    el.innerHTML = renderSlice(passage, merged, 0, limit) +
+      (limit < passage.length ? `<span class="gap" data-a="${limit}" data-b="${passage.length}">⋯ show remaining ${fmt(passage.length - limit)} chars ⋯</span>` : "");
+    return;
+  }
+  const ctx = S.ctx;
+  const wins = [];
+  for (const m of merged) {
+    const w = { start: Math.max(0, m.start - ctx), end: Math.min(passage.length, m.end + ctx) };
+    const last = wins[wins.length - 1];
+    if (last && w.start <= last.end) last.end = Math.max(last.end, w.end); else wins.push(w);
+  }
+  let html = "", pos = 0;
+  for (const w of wins) {
+    if (w.start > pos) html += `<span class="gap" data-a="${pos}" data-b="${w.start}">⋯ ${fmt(w.start - pos)} chars hidden ⋯</span>`;
+    html += renderSlice(passage, merged, w.start, w.end);
+    pos = w.end;
+  }
+  if (pos < passage.length) html += `<span class="gap" data-a="${pos}" data-b="${passage.length}">⋯ ${fmt(passage.length - pos)} chars hidden ⋯</span>`;
+  el.innerHTML = html;
+}
+
+// ---------- record view ----------
+const STATUS_ICON = { exact: "✓", fuzzy: "≈", approx: "~", nf: "✗" };
+function flashMark(m) {
+  m.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  m.classList.add("flash");
+  setTimeout(() => m.classList.remove("flash"), 1200);
+}
+function renderColumn(name, rec) {
+  const col = document.createElement("div");
+  col.className = "col";
+  if (!rec) {
+    col.innerHTML = `<div class="colTop"><div class="colHead"><div class="colTitle">${esc(shortName(name))}</div></div></div>
+                     <div class="missing">record not found in this file<br><small>(run may still be in progress)</small></div>`;
+    return col;
+  }
+  const passage = rec.passage || "";
+  const spans = rec.selected_spans || [];
+  const { merged, status } = analyze(passage, spans);
+  const stats = [];
+  const count = kind => status.filter(s => s.kind === kind).length;
+  const nMiss = count("nf");
+  stats.push(`<span class="badge ${nMiss ? "miss" : "ok"}"
+    title="✓ verbatim · ≈ normalized (whitespace/quotes/case) · ~ approximate (≤${Math.round(APPROX_RATE * 100)}% edits) · ✗ not found">
+    ${count("exact")}✓ ${count("fuzzy")}≈ ${count("approx")}~ ${nMiss}✗ of ${spans.length} spans</span>`);
+  if (rec.was_truncated != null)
+    stats.push(rec.was_truncated ? '<span class="badge trunc">truncated</span>' : '<span class="badge ok">not truncated</span>');
+  if (rec.document_tokens != null) {
+    const cut = rec.was_truncated && rec.document_tokens_truncated != null;
+    stats.push(`<span class="badge">doc ${fmt(rec.document_tokens)}${cut ? "→" + fmt(rec.document_tokens_truncated) : ""} tok</span>`);
+  }
+  if (rec.prompt_tokens != null) stats.push(`<span class="badge">prompt ${fmt(rec.prompt_tokens)} tok</span>`);
+  stats.push(`<span class="badge">${fmt(passage.length)} chars</span>`);
+
+  const chips = spans.map((s, i) => {
+    const st = status[i];
+    const extra = st.kind === "approx"
+      ? ` — approx match: ${st.err} edit${st.err === 1 ? "" : "s"} (${(st.rate * 100).toFixed(1)}%)` : "";
+    return `<span class="chip ${st.kind === "nf" ? "nf" : "c" + (i % 8)}" data-s="${i}" title="${esc((s || "") + extra)}">
+       ${STATUS_ICON[st.kind]} <span class="t">${esc((s || "(empty)").slice(0, 80))}</span></span>`;
+  }).join("");
+
+  col.innerHTML = `
+    <div class="colTop">
+      <div class="colHead"><div class="colTitle">${esc(shortName(name))}</div><div class="stats">${stats.join("")}</div></div>
+      <div class="spans">${chips || '<span class="badge empty">no spans</span>'}</div>
+    </div>
+    <div class="passage"></div>`;
+  const passEl = col.querySelector(".passage");
+  renderPassage(passEl, passage, merged);
+
+  passEl.addEventListener("click", e => {           // expand hidden gaps in place
+    const gap = e.target.closest(".gap");
+    if (!gap) return;
+    const tmp = document.createElement("span");
+    tmp.innerHTML = renderSlice(passage, merged, +gap.dataset.a, +gap.dataset.b);
+    gap.replaceWith(tmp);
+  });
+  col.querySelector(".spans").addEventListener("click", e => {  // chip -> scroll to span
+    const chip = e.target.closest(".chip");
+    if (!chip || chip.classList.contains("nf")) return;
+    const mark = passEl.querySelector(`mark[data-s~="${chip.dataset.s}"]`);
+    if (!mark) return;
+    flashMark(mark);
+  });
+  return col;
+}
+
+let openSeq = 0;
+async function openRecord(idx) {
+  const seq = ++openSeq;
+  S.curIdx = idx;
+  document.querySelectorAll(".row.sel").forEach(r => r.classList.remove("sel"));
+  const row = document.querySelector(`.row[data-idx="${idx}"]`);
+  if (row) { row.classList.add("sel"); row.scrollIntoView({ block: "nearest" }); }
+
+  const primary = await api("/api/record", { file: S.selected[0], idx });
+  if (seq !== openSeq) return;
+  const rec = primary.record;
+  const key = [rec.subset, rec.qid, rec.doc_id].join("|");
+  const others = await Promise.all(S.selected.slice(1).map(f =>
+    api("/api/recordByKey", { file: f, key }).catch(() => ({ record: null }))));
+  if (seq !== openSeq) return;
+
+  $("placeholder").hidden = true;
+  const h = $("recHeader");
+  h.hidden = false;
+  h.innerHTML = `<div class="queryLabel">query</div><div class="query">${esc(rec.query || "")}</div>
+    <div class="ids"><span>#${idx}</span><span>subset: ${esc(String(rec.subset))}</span>
+    <span>qid: ${esc(String(rec.qid))}</span><span>doc_id: ${esc(String(rec.doc_id))}</span></div>`;
+
+  const cols = $("cols");
+  cols.innerHTML = "";
+  cols.style.setProperty("--ncols", S.selected.length);
+  cols.appendChild(renderColumn(S.selected[0], rec));
+  others.forEach((o, i) => cols.appendChild(renderColumn(S.selected[i + 1], o.record)));
+
+  // Jump straight to the first highlighted span of the newly opened record.
+  cols.scrollTop = 0;
+  S.markCursor = -1;
+  requestAnimationFrame(() => {
+    const first = cols.querySelector(".passage mark");
+    if (first) { S.markCursor = 0; flashMark(first); }
+  });
+}
+
+function gotoMark(step) {
+  const marks = [...$("cols").querySelectorAll(".passage mark")];
+  if (!marks.length) return;
+  S.markCursor = ((S.markCursor ?? -1) + step + marks.length) % marks.length;
+  flashMark(marks[S.markCursor]);
+}
+
+// ---------- view controls / keyboard ----------
+$("fullText").onchange = () => { S.fullText = $("fullText").checked; if (S.curIdx != null) openRecord(S.curIdx); };
+$("ctxSize").onchange = () => { S.ctx = Math.max(50, +$("ctxSize").value || 300); if (S.curIdx != null && !S.fullText) openRecord(S.curIdx); };
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, select, textarea")) return;
+  if (e.key === "f") { $("fullText").checked = !$("fullText").checked; $("fullText").onchange(); return; }
+  if (e.key === "n") { gotoMark(1); return; }
+  if (e.key === "p") { gotoMark(-1); return; }
+  if (e.key !== "j" && e.key !== "k" && e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const dir = (e.key === "k" || e.key === "ArrowDown") ? 1 : -1;
+  const cur = S.items.findIndex(it => it.idx === S.curIdx);
+  const next = cur === -1 ? 0 : cur + dir;
+  if (next >= 0 && next < S.items.length) openRecord(S.items[next].idx);
+  if (next >= S.items.length - 5 && S.items.length < S.total) loadMore();
+});
+
+loadFiles().then(resetList);
+</script>
+</body>
+</html>
