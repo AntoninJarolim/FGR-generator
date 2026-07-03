@@ -7,16 +7,19 @@
 # span-not-found regeneration loop, and loops over the models below.
 
 # Usage:
-#   ./run_generate_vllm.sh            # full run
-#   ./run_generate_vllm.sh --dry-run  # only the first 10 samples, overwrite existing
+#   ./run_generate_vllm.sh                  # full run
+#   ./run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
+#   ./run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
 # --- Argument parsing ---
+# --dry-run is consumed here; everything else is forwarded to llm_extraction.py.
 DRY_RUN=0
+EXTRA_ARGS=()
 for arg in "$@"; do
   case $arg in
     --dry-run) DRY_RUN=1 ;;
-    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    *) EXTRA_ARGS+=("$arg") ;;
   esac
 done
 
@@ -99,5 +102,6 @@ for MODEL_NAME in "${MODELS[@]}"; do
         --vllm_gpu_memory_utilization 0.9 \
         --vllm_guided_json \
         --skip-regeneration \
-        "${DRY_RUN_ARGS[@]}"
+        "${DRY_RUN_ARGS[@]}" \
+        "${EXTRA_ARGS[@]}"
 done
