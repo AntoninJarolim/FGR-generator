@@ -20,7 +20,7 @@
 
 #PBS -N fgr-large-vllm
 #PBS -q gpu_dgx@pbs-m1.metacentrum.cz
-#PBS -l select=1:ncpus=64:ngpus=4:mem=128gb:scratch_ssd=1000gb
+#PBS -l select=1:ncpus=64:ngpus=4:mem=64gb:scratch_ssd=1000gb
 #PBS -l walltime=24:00:00
 #PBS -j oe
 
