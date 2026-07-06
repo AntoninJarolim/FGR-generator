@@ -23,6 +23,8 @@
 #PBS -l select=1:ncpus=64:ngpus=4:mem=64gb:scratch_ssd=1000gb
 #PBS -l walltime=24:00:00
 #PBS -j oe
+#PBS -o logs/
+#PBS -e logs/
 
 set -euo pipefail
 
@@ -36,8 +38,8 @@ echo "Repo dir: $REPO_DIR"
 echo "Host: $(hostname); GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 
 # --- MetaCentrum init ------------------------------------------------------
-# Frontends/compute nodes provide conda via the mambaforge module. Skip if a
-# conda is already on PATH (e.g. running outside MetaCentrum for testing).
+# Frontends/compute nodes provide conda via the mambaforge module. Skip ifo logs/
+# PBS -e logs/ conda is already on PATH (e.g. running outside MetaCentrum for testing).
 if ! command -v conda >/dev/null 2>&1; then
   module add mambaforge
 fi
@@ -71,7 +73,9 @@ if [ "${FGR_SKIP_ENV_SETUP:-0}" -ne 1 ]; then
       conda create -y -n fgr-generator python=3.13
     fi
   fi
+  echo "Lest activate fgr-generator"
   conda activate fgr-generator
+  echo "Activated successfully"
   # requirements-lock.txt is the pip freeze of the working local env
   # (requirements.txt is unpinned and may lag behind it).
   REQ_FILE="requirements-lock.txt"
