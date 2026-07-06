@@ -3,10 +3,10 @@
 # OpenAI-compatible API. No GPU needed -- this only sends API requests, but
 # the fgr-generator conda env is still activated so python has the repo deps.
 #
-# Mirrors run_generate_vllm.sh (same dataset, template, psg key, batch size)
-# but drops the vLLM engine params, which are meaningless for an API client.
-# The span-not-found regeneration loop stays ENABLED: the API side has no
-# guided-JSON decoding, so regeneration is what fixes unmatched spans.
+# Mirrors run_generate_vllm.sh (same dataset, template, psg key, batch size,
+# --skip-regeneration) but drops the vLLM engine params, which are meaningless
+# for an API client. The span-not-found regeneration loop is skipped: samples
+# with unmatched spans are only annotated with extraction_error, not re-queried.
 #
 # Usage:
 #   ./run_generate_einfra.sh                  # full run
@@ -89,6 +89,7 @@ for MODEL_NAME in "${EINFRA_MODELS[@]}"; do
         --generation_client ollama \
         --api_token_env_var E_INFRA_API_TOKEN \
         --batch_size 128 \
+        --skip-regeneration \
         "${DRY_RUN_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"
 done
