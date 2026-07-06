@@ -7,7 +7,7 @@ from datetime import datetime
 
 from jinja2 import Template
 from jsonlines import jsonlines
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -18,7 +18,12 @@ from utils.longembed import is_longembed, load_longembed
 
 
 class OpenAIGenerator:
-    def __init__(self, model_name, generation_client=False, api_token_env_var=None):
+    # Seconds to wait between retries of a timed-out request, so a busy server
+    # is not hammered the moment it refused us.
+    RETRY_SLEEP_S = 30
+
+    def __init__(self, model_name, generation_client=False, api_token_env_var=None,
+                 max_retries=50):
         url = os.getenv('OPENAI_BASE_URL') + '/v1'
         if generation_client == 'ollama':
             print("Initialized OLLAMA generation client.")
@@ -29,6 +34,7 @@ class OpenAIGenerator:
         else:
             self.client = OpenAI()
         self.model = model_name  # self.model = "gpt-4o-2024-08-06" "gpt-4o-mini"
+        self.max_retries = max_retries
 
         self.temperature = 0.2
         self.max_tokens = 2**14 # 16384
@@ -68,8 +74,20 @@ class OpenAIGenerator:
 
     def __call__(self, system_prompt, user_prompt):
         api_dict = self.create_api_call_dict(system_prompt, user_prompt)
-        generation_result = self.client.chat.completions.create(**api_dict)
-        return generation_result
+        # A busy server (e.g. e-INFRA under load, where our requests may have
+        # low priority) surfaces as APITimeoutError. Retry instead of crashing
+        # the whole run -- a quiet window (e.g. at night) will let it through.
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self.client.chat.completions.create(**api_dict)
+            except APITimeoutError:
+                if attempt == self.max_retries:
+                    tqdm.write(f"Request timed out and all {self.max_retries} retries "
+                               f"are exhausted, giving up.")
+                    raise
+                tqdm.write(f"Request timed out, retrying in {self.RETRY_SLEEP_S}s "
+                           f"(retry {attempt + 1}/{self.max_retries}).")
+                time.sleep(self.RETRY_SLEEP_S)
 
 
 # JSON schema for the {"spans": [...]} contract that the downstream parser
@@ -623,7 +641,12 @@ def annotate_failed_extraction(output_data_file, indexes_to_remove):
 
 
 def find_invalid_samples(output_data_file, last_invalid_indexes, psg_key):
-    tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base', truncation=False)
+    # This tokenizer only computes offset mappings for span matching -- nothing
+    # is fed to a model, so the 512-token XLM-R limit is irrelevant. Override
+    # model_max_length so transformers does not print a "Token indices sequence
+    # length is longer than ... (N > 512)" warning for every long passage.
+    tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base',
+                                              model_max_length=10**9)
     dataset = ExplanationsDataset(output_data_file, tokenizer,
                                   decode_positive_as_list=True,
                                   error_on_invalid=True, psg_key=psg_key)
@@ -765,6 +788,10 @@ def get_args():
     parser.add_argument('--api_token_env_var', type=str,
                         default='E_INFRA_API_TOKEN',
                         help='API token for E_INFRA')
+    parser.add_argument('--max_retries', type=int, default=50,
+                        help="How many times to retry a request that failed with "
+                             "APITimeoutError (busy/overloaded server) before crashing. "
+                             "Each retry is announced with its count.")
 
     # Native vLLM offline-inference args (only used with --generation_client vllm)
     parser.add_argument('--vllm_max_model_len', type=int, default=None,
@@ -804,7 +831,8 @@ def main():
             generation_api = OpenAIGenerator(
                 args.model_name,
                 generation_client=args.generation_client,
-                api_token_env_var=args.api_token_env_var
+                api_token_env_var=args.api_token_env_var,
+                max_retries=args.max_retries
             )
 
     else:

@@ -58,10 +58,20 @@ fi
 
 # --- Conda env: create or sync `fgr-generator` -----------------------------
 # Named env (not --prefix) so run_generate_vllm.sh's `conda activate
-# fgr-generator` works unchanged; ~/.conda/envs lives on /storage home.
+# fgr-generator` works unchanged. NOTE: the mambaforge module's install lives
+# on read-only AFS, so a named env is NOT created under $CONDA_BASE/envs --
+# conda/mamba falls back to the first WRITABLE entry in envs_dirs (a /storage
+# path, e.g. ~/projects/mamba). Never hardcode the env path; after
+# `conda activate` use $CONDA_PREFIX, which points at the real location.
 # Set FGR_SKIP_ENV_SETUP=1 to skip when the env is known to be ready.
 CONDA_BASE="$(conda info --base)"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+# The package cache next to the read-only AFS install is unusable ("Could not
+# open lockfile .../pkgs/cache/cache.lock"); download packages into scratch
+# (or home when run interactively) instead.
+export CONDA_PKGS_DIRS="${SCRATCHDIR:-$HOME}/conda-pkgs"
+mkdir -p "$CONDA_PKGS_DIRS"
 
 if [ "${FGR_SKIP_ENV_SETUP:-0}" -ne 1 ]; then
   if ! conda env list | grep -qE '^fgr-generator\s'; then
@@ -75,13 +85,21 @@ if [ "${FGR_SKIP_ENV_SETUP:-0}" -ne 1 ]; then
   fi
   echo "Lest activate fgr-generator"
   conda activate fgr-generator
-  echo "Activated successfully"
+  # $CONDA_PREFIX is the activated env's real location, wherever envs_dirs put
+  # it ($CONDA_BASE/envs is read-only AFS here, so it is NOT there -- see the
+  # note above). The previous hardcoded $CONDA_BASE/envs/fgr-generator/bin/pip
+  # path killed the job with "No such file or directory".
+  echo "Activated env prefix: $CONDA_PREFIX"
+  if [ ! -x "$CONDA_PREFIX/bin/pip" ]; then
+    echo "ERROR: pip not found in activated env ($CONDA_PREFIX/bin/pip)." >&2
+    exit 1
+  fi
   # requirements-lock.txt is the pip freeze of the working local env
   # (requirements.txt is unpinned and may lag behind it).
   REQ_FILE="requirements-lock.txt"
   [ -f "$REQ_FILE" ] || REQ_FILE="requirements.txt"
   echo "Installing python deps from $REQ_FILE ..."
-  "$CONDA_BASE/envs/fgr-generator/bin/pip" install -r "$REQ_FILE"
+  "$CONDA_PREFIX/bin/pip" install -r "$REQ_FILE"
   conda deactivate
 fi
 
