@@ -5,9 +5,9 @@
 # (modules, scratch, caches), (2) creates/updates the `fgr-generator` conda
 # env from requirements-lock.txt (a pip freeze of the known-working local
 # env; falls back to the unpinned requirements.txt), and (3) runs
-# run_generate_vllm.sh with RUN_LARGE_MODELS=1 so the LARGE_MODELS list
-# (gemma-4-31B, gemma-4-26B-A4B, Qwen3.6-27B) is used. llm_extraction.py
-# auto-sets vLLM tensor_parallel_size to the number of allocated GPUs.
+# run_generate_vllm.sh with RUN_EXTREME_MODELS=1 so the EXTREME_MODELS list
+# (Qwen3-235B-A22B-Thinking-2507) is used. llm_extraction.py auto-sets
+# vLLM tensor_parallel_size to the number of allocated GPUs.
 #
 # Usage (from the repo directory on a MetaCentrum frontend, repo on /storage):
 #   qsub dgx_run_generate_vllm.sh
@@ -81,8 +81,8 @@ if [ "${FGR_SKIP_ENV_SETUP:-0}" -ne 1 ]; then
   conda deactivate
 fi
 
-# --- Run the generation over the large models ------------------------------
-export RUN_LARGE_MODELS=1
+# --- Run the generation over the extreme-size models -----------------------
+export RUN_EXTREME_MODELS=1
 
 # run_generate_vllm.sh has a zsh shebang but is bash-compatible; MetaCentrum
 # nodes are not guaranteed to have zsh, so pick whichever exists.

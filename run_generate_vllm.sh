@@ -50,9 +50,18 @@ LARGE_MODELS=(
     "Qwen/Qwen3.6-27B"
 )
 
+# Frontier-scale MoE models; need a multi-GPU node (e.g. several 80 GB+ GPUs
+# with tensor parallelism) even at bf16/fp8.
+EXTREME_MODELS=(
+    "Qwen/Qwen3-235B-A22B-Thinking-2507"
+)
+
 # On big-GPU machines (e.g. MetaCentrum DGX via dgx_run_generate_vllm.sh) run
-# the large models instead of the local-VRAM-sized ones.
-if [ "${RUN_LARGE_MODELS:-0}" -eq 1 ]; then
+# the large or extreme models instead of the local-VRAM-sized ones.
+if [ "${RUN_EXTREME_MODELS:-0}" -eq 1 ]; then
+  echo "RUN_EXTREME_MODELS=1: using the EXTREME_MODELS list."
+  MODELS=("${EXTREME_MODELS[@]}")
+elif [ "${RUN_LARGE_MODELS:-0}" -eq 1 ]; then
   echo "RUN_LARGE_MODELS=1: using the LARGE_MODELS list."
   MODELS=("${LARGE_MODELS[@]}")
 fi
