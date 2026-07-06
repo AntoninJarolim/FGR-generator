@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FGR dashboard</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #dcdfe4; --text: #1c2128;
+    --muted: #6b7280; --accent: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 34px; padding: 40px 20px;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header { text-align: center; }
+  header h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: .01em; }
+  header p { margin: 0; color: var(--muted); }
+  #tiles {
+    display: grid; gap: 22px; width: 100%; max-width: 760px;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
+  .tile {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+    padding: 26px 24px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; text-decoration: none; color: inherit;
+    transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+  }
+  .tile:hover {
+    transform: translateY(-3px); border-color: var(--accent);
+    box-shadow: 0 8px 22px rgba(37, 99, 235, .13);
+  }
+  .tile .icon { font-size: 40px; line-height: 1; }
+  .tile h2 { margin: 4px 0 0; font-size: 17px; letter-spacing: .02em; }
+  .tile p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  footer { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FGR generator</h1>
+  <p>fine-grained relevance supervision — inspection dashboard</p>
+</header>
+
+<div id="tiles">
+  <a class="tile" href="/viz">
+    <span class="icon">🔍</span>
+    <h2>FGR-DATA-VIZ</h2>
+    <p>Browse documents, queries and extracted spans. Highlights each span in
+       context, compares models side by side, filters and keyboard review.</p>
+  </a>
+  <a class="tile" href="/stats">
+    <span class="icon">📊</span>
+    <h2>FGR-DATA-MISMATCH-STATS</h2>
+    <p>Span match-rate table per model: exact / normalized / approximate match
+       percentages, macro-aggregated, for all datasets and each subset.</p>
+  </a>
+</div>
+
+<footer>more tools will appear here</footer>
+</body>
+</html>

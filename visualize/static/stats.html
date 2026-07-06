@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FGR mismatch stats</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #dcdfe4; --text: #1c2128;
+    --muted: #6b7280; --accent: #2563eb; --bad: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 40px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header a.home { text-decoration: none; font-size: 18px; color: var(--muted); }
+  header a.home:hover { color: var(--accent); }
+  header h1 { font-size: 15px; margin: 0; }
+  main { max-width: 900px; margin: 0 auto; padding: 20px 16px; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 4px 0 22px; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px 16px; margin-bottom: 22px; }
+  section h2 { margin: 0 0 2px; font-size: 15px; word-break: break-all; }
+  section .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #eef0f3; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:first-child { font-weight: 600; background: #f8fafd; }  /* All datasets */
+  td.na { color: var(--muted); }
+  .loading { color: var(--muted); padding: 10px 0; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <a class="home" href="/" title="dashboard">⌂</a>
+  <h1>FGR-DATA-MISMATCH-STATS — span match rates per model</h1>
+</header>
+<main>
+  <div class="note">
+    Columns are <b>cumulative</b> — each one also counts every stricter tier:
+    <b>EM</b> (verbatim) ⊆ <b>+ normalized</b> (also case / quotes / dashes /
+    whitespace) ⊆ <b>+ approximate</b> (also ≤5% character edits). The
+    remainder from “+ approximate” to 100% is <i>not found</i>.
+    Macro aggregation: tier rates are first averaged over the spans of each
+    sample, then averaged over samples — every sample weighs the same.
+    Samples with no extracted spans are excluded from the percentages
+    (counted in “# no spans”).
+  </div>
+  <div id="content"><div class="loading">loading file list…</div></div>
+</main>
+
+<script>
+"use strict";
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const pct = v => v == null ? '<td class="na">—</td>' : `<td>${(v * 100).toFixed(1)}%</td>`;
+const fmt = n => n.toLocaleString("en-US");
+const shortName = f => f.replace(/^.*\//, "").replace(/\.jsonl$/, "");
+
+async function main() {
+  const content = document.getElementById("content");
+  let files;
+  try {
+    files = (await (await fetch("/api/files")).json()).files;
+  } catch (e) {
+    content.innerHTML = `<div class="err">failed to load file list: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (!files.length) { content.innerHTML = '<div class="loading">no output files found</div>'; return; }
+
+  content.innerHTML = "";
+  for (const f of files) {
+    const sec = document.createElement("section");
+    sec.innerHTML = `<h2>${esc(shortName(f.name))}</h2>
+      <div class="sub">${esc(f.name)} · ${(f.size / 1e9).toFixed(2)} GB</div>
+      <div class="loading">computing / loading statistics… (first time can take ~1 min per file)</div>`;
+    content.appendChild(sec);
+  }
+
+  // Sequential: the server computes one file at a time anyway, and this way
+  // the first table appears as soon as it is ready.
+  files.forEach(async (f, i) => {
+    const sec = content.children[i];
+    try {
+      const data = await (await fetch("/api/stats?" + new URLSearchParams({ file: f.name }))).json();
+      if (data.error) throw new Error(data.error);
+      sec.querySelector(".loading").outerHTML = renderTable(data.groups);
+    } catch (e) {
+      sec.querySelector(".loading").outerHTML = `<div class="err">failed: ${esc(e.message)}</div>`;
+    }
+  });
+}
+
+function renderTable(groups) {
+  // Cumulative view: each tier also includes all stricter tiers. Averaging is
+  // linear, so summing the macro-aggregated exclusive rates equals macro-
+  // aggregating cumulative indicators.
+  const rows = groups.map(g => {
+    const cumNorm = g.em == null ? null : g.em + g.norm;
+    const cumApprox = cumNorm == null ? null : cumNorm + g.approx;
+    return `
+    <tr>
+      <td>${esc(g.group)}</td>
+      ${pct(g.em)}${pct(cumNorm)}${pct(cumApprox)}
+      <td>${fmt(g.n)}</td>
+      <td>${fmt(g.n_nospan)}</td>
+    </tr>`;
+  }).join("");
+  return `<table>
+    <thead><tr>
+      <th>group</th><th>EM</th><th>+ normalized</th><th>+ approximate</th>
+      <th># samples</th><th># no spans</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+main();
+</script>
+</body>
+</html>

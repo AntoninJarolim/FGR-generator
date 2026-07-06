@@ -5,12 +5,15 @@ Serves ``visualize/static/index.html`` plus a small JSON API over the
 ``*.jsonl`` files under ``--data-dir`` (default ``data/extracted_relevancy``),
 one self-contained record per line.
 
+Pages: ``/`` dashboard, ``/viz`` data viewer, ``/stats`` span mismatch stats.
+
 Files are indexed lazily on first access (line offsets + light per-record
 summaries) so GB-scale files never get shipped to the browser; records stream
 one at a time. A file whose mtime/size changed (e.g. a run finished and
-rewrote it) is re-indexed automatically on the next request.
+rewrote it) is re-indexed automatically on the next request. Indexes and
+match-rate statistics are cached under ``visualize/.cache/``.
 
-Stdlib only -- no third-party dependencies.
+Stdlib only, except the stats computation which uses numpy (see stats.py).
 """
 import argparse
 import gzip
@@ -33,16 +36,18 @@ def record_key(rec):
 
 
 def make_summary(idx, rec, spans):
-    passage = rec.get("passage") or ""
+    # "clean_text"/"claim"/"document_id" are the older FDM output schema; a
+    # non-string span item is malformed model output found in some old files.
+    passage = rec.get("passage") or rec.get("clean_text") or ""
     return {
         "idx": idx,
         "key": record_key(rec),
         "subset": rec.get("subset"),
         "qid": rec.get("qid"),
-        "doc_id": rec.get("doc_id"),
-        "query": (rec.get("query") or "")[:200],
+        "doc_id": rec.get("doc_id") or rec.get("document_id"),
+        "query": (rec.get("query") or rec.get("claim") or "")[:200],
         "n_spans": len(spans),
-        "n_exact": sum(1 for s in spans if s and s in passage),
+        "n_exact": sum(1 for s in spans if isinstance(s, str) and s and s in passage),
         "was_truncated": rec.get("was_truncated"),
     }
 
@@ -64,6 +69,13 @@ class JsonlIndex:
         self.summaries = []
         self.key_to_idx = {}
         self.lock = threading.Lock()
+        # Span match-rate stats (see stats.py): computed once, cached beside
+        # the index cache, guarded by its own lock so a minutes-long compute
+        # never blocks record/list requests for this file.
+        self.stats_path = cache_path.removesuffix(".idx.json.gz") + ".stats.json"
+        self.stats = None
+        self._stats_sig = None
+        self.stats_lock = threading.Lock()
 
     def _signature(self):
         try:
@@ -138,6 +150,36 @@ class JsonlIndex:
         with open(self.path, "rb") as f:
             f.seek(self.offsets[idx])
             return json.loads(f.readline())
+
+    def ensure_stats(self):
+        """Return the match-rate stats rows, computing (one full pass +
+        matching, ~1 min per file) or loading the sidecar cache as needed."""
+        self.ensure()
+        with self.stats_lock:
+            sig = self._signature()
+            if self.stats is not None and self._stats_sig == sig:
+                return self.stats
+            from stats import compute_stats, STATS_VERSION
+            try:
+                with open(self.stats_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("sig") == sig and data.get("v") == STATS_VERSION:
+                    self.stats, self._stats_sig = data["stats"], sig
+                    return self.stats
+            except (OSError, json.JSONDecodeError):
+                pass
+            t0 = time.time()
+            self.stats = compute_stats(self.path)
+            self._stats_sig = sig
+            print(f"[stats] {os.path.basename(self.path)}: computed in {time.time() - t0:.1f}s")
+            try:
+                tmp = self.stats_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"sig": sig, "v": STATS_VERSION, "stats": self.stats}, f)
+                os.replace(tmp, self.stats_path)
+            except OSError as e:
+                print(f"[stats] warning: could not write cache {self.stats_path}: {e}")
+            return self.stats
 
 
 class Registry:
@@ -233,13 +275,19 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json({"error": message}, status=status)
 
+    PAGES = {
+        "/": "home.html",          # dashboard
+        "/viz": "index.html",      # data viewer
+        "/stats": "stats.html",    # span mismatch statistics
+    }
+
     def do_GET(self):
         parsed = urlparse(self.path)
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         try:
             route = getattr(self, "route_" + parsed.path.strip("/").replace("api/", "api_"), None)
-            if parsed.path in ("/", "/index.html"):
-                with open(os.path.join(STATIC_DIR, "index.html"), "rb") as f:
+            if parsed.path in self.PAGES:
+                with open(os.path.join(STATIC_DIR, self.PAGES[parsed.path]), "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif route:
                 route(params)
@@ -278,6 +326,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"idx {idx} out of range")
         self._json({"idx": idx, "record": index.read_record(idx)})
 
+    def route_api_stats(self, params):
+        index = REGISTRY.get(params["file"])
+        self._json({"file": params["file"], "groups": index.ensure_stats()})
+
     def route_api_recordByKey(self, params):
         index = REGISTRY.get(params["file"])
         idx = index.key_to_idx.get(params.get("key", ""))
@@ -305,7 +357,7 @@ def main():
         for f in REGISTRY.list_sources():
             try:
                 t0 = time.time()
-                REGISTRY.get(f["name"])
+                REGISTRY.get(f["name"]).ensure_stats()
                 print(f"[prewarm] {f['name']} ready in {time.time() - t0:.1f}s")
             except Exception as e:
                 print(f"[prewarm] {f['name']} failed: {e}")
