@@ -72,11 +72,16 @@
 
   #cols { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 12px; grid-template-columns: repeat(var(--ncols, 1), minmax(340px, 1fr)); align-items: start; }
   .col { background: var(--card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
-  .colTop { position: sticky; top: 0; z-index: 5; background: var(--card); border-radius: 8px 8px 0 0; box-shadow: 0 2px 4px rgba(0,0,0,.05); }
+  /* Flex column so that when colTop heights are equalized across models (see
+     syncColTops), the spans area absorbs the extra space and the passage text
+     below starts at the same y in every column. */
+  .colTop { position: sticky; top: 0; z-index: 5; background: var(--card); border-radius: 8px 8px 0 0; box-shadow: 0 2px 4px rgba(0,0,0,.05); display: flex; flex-direction: column; }
+  .colTop .spans { flex: 1; align-content: flex-start; }
   .colTop .colHead { padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .col .colTitle { font-weight: 600; margin-bottom: 4px; word-break: break-all; }
   .col .stats { display: flex; gap: 5px; flex-wrap: wrap; }
-  .col .spans { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 5px; max-height: 26vh; overflow-y: auto; }
+  /* Cap at ~two chip rows (chip ~23px + 5px gap + 16px padding); more scroll. */
+  .col .spans { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 5px; max-height: 68px; overflow-y: auto; }
   .chip {
     display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
     padding: 2px 8px; border-radius: 11px; font-size: 12px; cursor: pointer; border: 1px solid transparent;
@@ -155,7 +160,7 @@ const S = {
   markCursor: -1,                     // n/p span-navigation position
 };
 const filters = () => ({ q: $("search").value, subset: $("subset").value, flag: $("flag").value });
-const shortName = f => (f.startsWith("live:") ? "⏳ " : "") + f.replace(/^live:/, "").replace(/^.*\//, "").replace(/\.jsonl$/, "");
+const shortName = f => f.replace(/^.*\//, "").replace(/\.jsonl$/, "");
 
 // ---------- model selection ----------
 async function loadFiles() {
@@ -391,7 +396,7 @@ function renderColumn(name, rec) {
   col.className = "col";
   if (!rec) {
     col.innerHTML = `<div class="colTop"><div class="colHead"><div class="colTitle">${esc(shortName(name))}</div></div></div>
-                     <div class="missing">record not found in this file<br><small>(run may still be in progress)</small></div>`;
+                     <div class="missing">record not found in this file</div>`;
     return col;
   }
   const passage = rec.passage || "";
@@ -479,10 +484,26 @@ async function openRecord(idx) {
   cols.scrollTop = 0;
   S.markCursor = -1;
   requestAnimationFrame(() => {
+    syncColTops();   // before scrolling: aligning headers shifts the layout
     const first = cols.querySelector(".passage mark");
     if (first) { S.markCursor = 0; flashMark(first); }
   });
 }
+
+// Give every column's sticky header block the same height so the passage
+// texts start at the same y and stay visually comparable side by side.
+function syncColTops() {
+  const tops = [...$("cols").querySelectorAll(".colTop")];
+  if (tops.length < 2) return;
+  tops.forEach(t => t.style.minHeight = "");            // re-measure natural heights
+  const h = Math.max(...tops.map(t => t.offsetHeight));
+  tops.forEach(t => t.style.minHeight = h + "px");
+}
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(syncColTops, 150);
+});
 
 function gotoMark(step) {
   const marks = [...$("cols").querySelectorAll(".passage mark")];

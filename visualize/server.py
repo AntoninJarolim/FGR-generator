@@ -1,37 +1,30 @@
 #!/usr/bin/env python3
 """Local viewer for extracted-relevancy outputs.
 
-Serves ``visualize/static/index.html`` plus a small JSON API over two kinds of
-sources:
+Serves ``visualize/static/index.html`` plus a small JSON API over the
+``*.jsonl`` files under ``--data-dir`` (default ``data/extracted_relevancy``),
+one self-contained record per line.
 
-* finished output files -- ``*.jsonl`` under ``--data-dir``
-  (default ``data/extracted_relevancy``), one self-contained record per line;
-* live, in-progress runs -- batch ``*_output.jsonl`` files under
-  ``--generated-dir`` (default ``data/generated``). Those only hold raw model
-  responses keyed by row id, so the server joins them back to the LongEmbed
-  input (loaded once, same deterministic order as ``llm_extraction.py``) to
-  reconstruct full records while the generation run is still going.
-
-Sources are indexed lazily on first access (line offsets + light per-record
+Files are indexed lazily on first access (line offsets + light per-record
 summaries) so GB-scale files never get shipped to the browser; records stream
-one at a time. A source whose files changed (new batch finished, file
-rewritten) is re-indexed automatically on the next request.
+one at a time. A file whose mtime/size changed (e.g. a run finished and
+rewrote it) is re-indexed automatically on the next request.
+
+Stdlib only -- no third-party dependencies.
 """
 import argparse
 import gzip
 import json
 import os
 import re
-import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-sys.path.insert(0, REPO_ROOT)  # for utils.longembed when joining live runs
-
-LIVE_PREFIX = "live:"
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
 
 def record_key(rec):
@@ -54,28 +47,18 @@ def make_summary(idx, rec, spans):
     }
 
 
-# ---------------------------------------------------------------------------
-# LongEmbed input, needed to give live-run responses their query/passage back.
-# Loaded once on first live-source access; order matches llm_extraction.py.
-# ---------------------------------------------------------------------------
-_INPUT = {"records": None}
-_INPUT_LOCK = threading.Lock()
-
-
-def longembed_input():
-    with _INPUT_LOCK:
-        if _INPUT["records"] is None:
-            from utils.longembed import load_longembed
-            print("[live] loading LongEmbed input records (one-time)...")
-            _INPUT["records"] = load_longembed()
-        return _INPUT["records"]
-
-
 class JsonlIndex:
-    """Line-offset index + per-record summaries for one finished JSONL file."""
+    """Line-offset index + per-record summaries for one finished JSONL file.
 
-    def __init__(self, path):
+    Building means one full pass over the (possibly multi-GB) file, ~11 s per
+    3.6 GB, so the result is persisted to a gzipped sidecar under
+    ``visualize/.cache/`` and reloaded (<1 s) on later server runs. The cache
+    is keyed on the data file's (mtime, size) and rebuilt when they change.
+    """
+
+    def __init__(self, path, cache_path):
         self.path = path
+        self.cache_path = cache_path
         self._sig = None
         self.offsets = []
         self.summaries = []
@@ -85,16 +68,48 @@ class JsonlIndex:
     def _signature(self):
         try:
             st = os.stat(self.path)
-            return (st.st_mtime, st.st_size)
+            return [st.st_mtime, st.st_size]   # list: compares == after JSON round-trip
         except OSError:
             return None
 
     def ensure(self):
         with self.lock:
             sig = self._signature()
-            if sig != self._sig:
+            if sig == self._sig:
+                return
+            if not self._load_cache(sig):
                 self._build()
-                self._sig = sig
+                self._save_cache(sig)
+            self._sig = sig
+
+    def _load_cache(self, sig):
+        try:
+            with gzip.open(self.cache_path, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("sig") != sig:
+                return False
+        except (OSError, json.JSONDecodeError, EOFError):
+            return False
+        self.offsets, self.summaries = data["offsets"], data["summaries"]
+        self.key_to_idx = {}
+        for s in self.summaries:
+            self.key_to_idx.setdefault(s["key"], s["idx"])
+        print(f"[index] {os.path.basename(self.path)}: {len(self.offsets)} records (from cache)")
+        return True
+
+    def _save_cache(self, sig):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            gitignore = os.path.join(CACHE_DIR, ".gitignore")
+            if not os.path.exists(gitignore):
+                with open(gitignore, "w") as f:
+                    f.write("*\n")
+            tmp = self.cache_path + ".tmp"
+            with gzip.open(tmp, "wt", encoding="utf-8") as f:
+                json.dump({"sig": sig, "offsets": self.offsets, "summaries": self.summaries}, f)
+            os.replace(tmp, self.cache_path)
+        except OSError as e:
+            print(f"[index] warning: could not write cache {self.cache_path}: {e}")
 
     def _build(self):
         offsets, summaries, key_to_idx = [], [], {}
@@ -125,98 +140,11 @@ class JsonlIndex:
             return json.loads(f.readline())
 
 
-class LiveRunIndex:
-    """Index over an in-progress run directory of batch ``*_output.jsonl``
-    files, joined against the LongEmbed input by row id."""
-
-    BATCH_NUM = re.compile(r"batch[_-](\d+)")
-
-    def __init__(self, run_dir):
-        self.run_dir = run_dir
-        self._sig = None
-        self.summaries = []
-        self.spans_by_idx = []
-        self.row_ids = []
-        self.key_to_idx = {}
-        self.lock = threading.Lock()
-
-    def _batch_files(self):
-        try:
-            names = [n for n in os.listdir(self.run_dir) if n.endswith("_output.jsonl")]
-        except OSError:
-            return []
-        names.sort(key=lambda n: int(self.BATCH_NUM.search(n).group(1))
-                   if self.BATCH_NUM.search(n) else 0)
-        return [os.path.join(self.run_dir, n) for n in names]
-
-    def _signature(self):
-        return tuple((p, os.path.getsize(p)) for p in self._batch_files())
-
-    def ensure(self):
-        with self.lock:
-            sig = self._signature()
-            if sig != self._sig:
-                self._build()
-                self._sig = sig
-
-    @staticmethod
-    def _decode_spans(content):
-        """Same tolerance as llm_extraction.get_all_responses: a response that
-        is not a JSON object with a 'spans' list counts as zero spans."""
-        try:
-            obj = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            return []
-        if isinstance(obj, dict) and isinstance(obj.get("spans"), list):
-            return [s for s in obj["spans"] if isinstance(s, str)]
-        return []
-
-    def _build(self):
-        responses = {}
-        for path in self._batch_files():
-            with open(path, "rb") as f:
-                for line in f:
-                    try:
-                        parsed = json.loads(line)
-                        row_id = int(parsed["custom_id"].removeprefix("row_"))
-                        content = parsed["response"]["body"]["choices"][0]["message"]["content"]
-                    except (json.JSONDecodeError, KeyError, ValueError, IndexError):
-                        continue
-                    responses[row_id] = content
-
-        records = longembed_input()
-        summaries, spans_by_idx, row_ids, key_to_idx = [], [], [], {}
-        for row_id in sorted(responses):
-            if not 0 <= row_id < len(records):
-                continue
-            idx = len(summaries)
-            spans = self._decode_spans(responses[row_id])
-            summary = make_summary(idx, records[row_id], spans)
-            summary["row_id"] = row_id
-            summaries.append(summary)
-            spans_by_idx.append(spans)
-            row_ids.append(row_id)
-            key_to_idx.setdefault(summary["key"], idx)
-        self.summaries, self.spans_by_idx = summaries, spans_by_idx
-        self.row_ids, self.key_to_idx = row_ids, key_to_idx
-        print(f"[index] live {os.path.basename(self.run_dir)}: "
-              f"{len(summaries)} of {len(records)} records generated so far")
-
-    def __len__(self):
-        return len(self.summaries)
-
-    def read_record(self, idx):
-        rec = dict(longembed_input()[self.row_ids[idx]])
-        rec["selected_spans"] = self.spans_by_idx[idx]
-        return rec
-
-
 class Registry:
-    """Discovers finished files and live run dirs; caches their indexes."""
+    """Discovers output files under the data dir and caches their indexes."""
 
-    def __init__(self, data_dir, generated_dir):
+    def __init__(self, data_dir):
         self.data_dir = os.path.abspath(data_dir)
-        self.generated_dir = os.path.abspath(generated_dir)
         self.indexes = {}
         self.lock = threading.Lock()
 
@@ -226,31 +154,13 @@ class Registry:
             for fn in sorted(files):
                 if fn.endswith(".jsonl"):
                     full = os.path.join(root, fn)
+                    rel = os.path.relpath(full, self.data_dir)
                     found.append({
-                        "name": os.path.relpath(full, self.data_dir),
+                        "name": rel,
                         "size": os.path.getsize(full),
-                        "rows": self._rows_if_fresh(os.path.relpath(full, self.data_dir)),
+                        "rows": self._rows_if_fresh(rel),
                     })
-        if os.path.isdir(self.generated_dir):
-            for template in sorted(os.listdir(self.generated_dir)):
-                tdir = os.path.join(self.generated_dir, template)
-                if not os.path.isdir(tdir):
-                    continue
-                for run in sorted(os.listdir(tdir)):
-                    rdir = os.path.join(tdir, run)
-                    if not os.path.isdir(rdir):
-                        continue
-                    batches = [n for n in os.listdir(rdir) if n.endswith("_output.jsonl")]
-                    if not batches:
-                        continue
-                    name = f"{LIVE_PREFIX}{template}/{run}"
-                    found.append({
-                        "name": name,
-                        "size": sum(os.path.getsize(os.path.join(rdir, n)) for n in batches),
-                        "rows": self._rows_if_fresh(name),
-                        "live": True,
-                    })
-        return sorted(found, key=lambda d: (d.get("live", False), d["name"]))
+        return sorted(found, key=lambda d: d["name"])
 
     def _rows_if_fresh(self, name):
         idx = self.indexes.get(name)
@@ -265,17 +175,12 @@ class Registry:
         return index
 
     def _create(self, name):
-        if name.startswith(LIVE_PREFIX):
-            rel = name[len(LIVE_PREFIX):]
-            full = os.path.abspath(os.path.join(self.generated_dir, rel))
-            if not full.startswith(self.generated_dir + os.sep) or not os.path.isdir(full):
-                raise KeyError(name)
-            return LiveRunIndex(full)
         full = os.path.abspath(os.path.join(self.data_dir, name))
         if (not full.startswith(self.data_dir + os.sep) or not full.endswith(".jsonl")
                 or not os.path.isfile(full)):
             raise KeyError(name)
-        return JsonlIndex(full)
+        cache_name = re.sub(r"[^A-Za-z0-9._-]", "_", name) + ".idx.json.gz"
+        return JsonlIndex(full, os.path.join(CACHE_DIR, cache_name))
 
 
 REGISTRY = None  # set in main()
@@ -386,18 +291,28 @@ def main():
     global REGISTRY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
-                        help="Directory scanned (recursively) for finished *.jsonl output files.")
-    parser.add_argument("--generated-dir", default=os.path.join(REPO_ROOT, "data/generated"),
-                        help="Directory of in-progress runs (template/run/batch outputs).")
+                        help="Directory scanned (recursively) for *.jsonl output files.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
     args = parser.parse_args()
 
-    REGISTRY = Registry(args.data_dir, args.generated_dir)
+    REGISTRY = Registry(args.data_dir)
+
+    # Pre-warm every file's index in the background so first interactions are
+    # instant. With a valid sidecar cache each file loads in <1 s; otherwise it
+    # builds (and caches) here instead of blocking the first browser request.
+    def prewarm():
+        for f in REGISTRY.list_sources():
+            try:
+                t0 = time.time()
+                REGISTRY.get(f["name"])
+                print(f"[prewarm] {f['name']} ready in {time.time() - t0:.1f}s")
+            except Exception as e:
+                print(f"[prewarm] {f['name']} failed: {e}")
+    threading.Thread(target=prewarm, daemon=True).start()
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"FGR viewer: http://{args.host}:{args.port}/")
-    print(f"  finished outputs: {REGISTRY.data_dir}")
-    print(f"  live runs:        {REGISTRY.generated_dir}")
+    print(f"FGR viewer: http://{args.host}:{args.port}/  (data dir: {REGISTRY.data_dir})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
