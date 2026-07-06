@@ -50,6 +50,13 @@ LARGE_MODELS=(
     "Qwen/Qwen3.6-27B"
 )
 
+# On big-GPU machines (e.g. MetaCentrum DGX via dgx_run_generate_vllm.sh) run
+# the large models instead of the local-VRAM-sized ones.
+if [ "${RUN_LARGE_MODELS:-0}" -eq 1 ]; then
+  echo "RUN_LARGE_MODELS=1: using the LARGE_MODELS list."
+  MODELS=("${LARGE_MODELS[@]}")
+fi
+
 # This script runs non-interactively, so ~/.zshrc is NOT sourced and the `conda`
 # shell function is never defined -- bare `conda activate` would fail with a
 # "run conda init" error. Source conda's profile script to load the function,
