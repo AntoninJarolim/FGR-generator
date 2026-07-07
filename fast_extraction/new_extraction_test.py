@@ -15,10 +15,10 @@ from torch.nn.utils.rnn import pad_sequence
 
 from fast_extraction.find_BLO import TokenByteFinder
 from llm_runner import LLMRunner, get_model_config
-from utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
+from custom_utils.text_utils import find_span, extract_span, remove_special_token, read_template, get_token_span, \
     find_first_token, find_last_token
-from utils.squad_dataset import load_or_create_gt_data
-from utils.other import TimedList
+from custom_utils.squad_dataset import load_or_create_gt_data
+from custom_utils.other import TimedList
 
 
 def create_prompt(template, **kwargs):

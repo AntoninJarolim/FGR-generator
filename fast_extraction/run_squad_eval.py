@@ -5,9 +5,9 @@ from argparse import Namespace
 from typing import Any, Literal
 
 from eval.eval_squad import f1_score, exact_match_score, metric_max_over_ground_truths
-from utils.print_examples import print_evaluation_stats, get_examples_dir
-from utils.artifact_hash import artifact_hash
-from utils import wandb_integration
+from custom_utils.print_examples import print_evaluation_stats, get_examples_dir
+from custom_utils.artifact_hash import artifact_hash
+from custom_utils import wandb_integration
 
 
 def save_artifacts_if_new(

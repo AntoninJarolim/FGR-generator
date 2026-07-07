@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from explainable_dataset import ExplanationsDataset
-from utils.longembed import is_longembed, load_longembed
+from custom_utils.longembed import is_longembed, load_longembed
 
 
 
@@ -91,7 +91,7 @@ class OpenAIGenerator:
 
 
 # JSON schema for the {"spans": [...]} contract that the downstream parser
-# (utils/text_utils.find_spans / decode_one) expects: a list of verbatim
+# (custom_utils/text_utils.find_spans / decode_one) expects: a list of verbatim
 # substring strings. Used for optional vLLM guided (constrained) decoding.
 SPANS_JSON_SCHEMA = {
     "type": "object",
