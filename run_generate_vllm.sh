@@ -3,7 +3,8 @@
 # inference. No server and no OPENAI_BASE_URL needed -- this loads the model
 # weights in-process, so it must run on a machine with a GPU.
 #
-# Uses constrained (guided-JSON) decoding + greedy sampling, skips the
+# Uses span-grammar constrained decoding (every generated span is a verbatim
+# contiguous substring of its own document) + greedy sampling, skips the
 # span-not-found regeneration loop, and loops over the models below.
 
 # Usage:
@@ -13,12 +14,15 @@
 set -euo pipefail
 
 # --- Argument parsing ---
-# --dry-run is consumed here; everything else is forwarded to llm_extraction.py.
+# --dry-run and --unconstrained are consumed here; everything else is
+# forwarded to llm_extraction.py.
 DRY_RUN=0
+UNCONSTRAINED=0
 EXTRA_ARGS=()
 for arg in "$@"; do
   case $arg in
     --dry-run) DRY_RUN=1 ;;
+    --unconstrained) UNCONSTRAINED=1 ;;
     *) EXTRA_ARGS+=("$arg") ;;
   esac
 done
@@ -31,8 +35,22 @@ if [ "$DRY_RUN" -eq 1 ]; then
   DRY_RUN_ARGS=(--to_sample 10 --force_rewrite)
 fi
 
-# long-embed base -> loads templates/long-embed-system.template + long-embed-user.template
-TEMPLATE_FILE="templates/long-embed.template"
+# long-embed-constrained base -> loads templates/long-embed-constrained-system.template
+# + long-embed-constrained-user.template (delimiter-wrapped span output; together
+# with --vllm_span_grammar every generated span is GUARANTEED to be a verbatim
+# contiguous substring of its own document).
+#
+# --unconstrained runs the ablation for a fair comparison: the IDENTICAL prompt
+# (long-embed-unconstrained templates are byte-for-byte copies, under a
+# different name only so outputs land in a separate directory) with free
+# decoding -- no grammar -- and only the delimiter-format parsing kept.
+TEMPLATE_FILE="templates/long-embed-constrained.template"
+MODE_ARGS=(--vllm_span_grammar)
+if [ "$UNCONSTRAINED" -eq 1 ]; then
+  echo "UNCONSTRAINED ablation: same prompt, no decoding constraint."
+  TEMPLATE_FILE="templates/long-embed-unconstrained.template"
+  MODE_ARGS=(--span_text_format)
+fi
 
 # HuggingFace model ids to loop over. Only models that fit in the local
 # 2x RTX 3090 (48 GB total) budget are enabled here.
@@ -116,7 +134,7 @@ for MODEL_NAME in "${MODELS[@]}"; do
         --vllm_max_model_len 65536 \
         --max_gen_tokens 8192 \
         --vllm_gpu_memory_utilization 0.9 \
-        --vllm_guided_json \
+        "${MODE_ARGS[@]}" \
         --skip-regeneration \
         "${DRY_RUN_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"

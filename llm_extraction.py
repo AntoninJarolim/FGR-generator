@@ -7,7 +7,8 @@ from datetime import datetime
 
 from jinja2 import Template
 from jsonlines import jsonlines
-from openai import OpenAI, APITimeoutError
+from openai import (OpenAI, APITimeoutError, APIConnectionError,
+                    InternalServerError, RateLimitError)
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -75,17 +76,19 @@ class OpenAIGenerator:
     def __call__(self, system_prompt, user_prompt):
         api_dict = self.create_api_call_dict(system_prompt, user_prompt)
         # A busy server (e.g. e-INFRA under load, where our requests may have
-        # low priority) surfaces as APITimeoutError. Retry instead of crashing
-        # the whole run -- a quiet window (e.g. at night) will let it through.
+        # low priority) surfaces as a timeout, a dropped connection, a 500
+        # ("Server disconnected") or a 429. All are transient -- retry instead
+        # of crashing the run; a quiet window (e.g. at night) will let it through.
         for attempt in range(self.max_retries + 1):
             try:
                 return self.client.chat.completions.create(**api_dict)
-            except APITimeoutError:
+            except (APITimeoutError, APIConnectionError,
+                    InternalServerError, RateLimitError) as e:
                 if attempt == self.max_retries:
-                    tqdm.write(f"Request timed out and all {self.max_retries} retries "
+                    tqdm.write(f"{type(e).__name__} and all {self.max_retries} retries "
                                f"are exhausted, giving up.")
                     raise
-                tqdm.write(f"Request timed out, retrying in {self.RETRY_SLEEP_S}s "
+                tqdm.write(f"{type(e).__name__} ({e}), retrying in {self.RETRY_SLEEP_S}s "
                            f"(retry {attempt + 1}/{self.max_retries}).")
                 time.sleep(self.RETRY_SLEEP_S)
 
@@ -122,7 +125,15 @@ class VLLMGenerator:
 
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
-                 guided_json=False, psg_key='passage'):
+                 guided_json=False, psg_key='passage', span_grammar=False,
+                 span_format=False):
+
+        if guided_json and span_grammar:
+            raise ValueError("--vllm_guided_json and --vllm_span_grammar are mutually exclusive.")
+        # The delimiter output format (<spans>/<s>...</s>) is implied by the
+        # grammar; it can also be requested alone (--span_text_format) for the
+        # unconstrained ablation that uses the same prompt without the grammar.
+        self.span_format = span_format or span_grammar
 
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
@@ -135,14 +146,33 @@ class VLLMGenerator:
         self.model = model_name
         self.max_gen_tokens = max_gen_tokens
         self.psg_key = psg_key
+        self.span_grammar = span_grammar
         self._n_truncated = 0
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        llm_kwargs = {}
+        if span_grammar:
+            # Per-document substring grammars use llguidance's lark dialect,
+            # which only the "guidance" structured-outputs backend understands.
+            # Forcing it also skips the per-request xgrammar validation attempt
+            # that backend="auto" would run (and fail) on every 250KB grammar.
+            from vllm.config import StructuredOutputsConfig
+            llm_kwargs['structured_outputs_config'] = StructuredOutputsConfig(backend='guidance')
+            # llguidance's default parser limits reject substring grammars over
+            # ~200KB documents. vLLM offers no way to pass LLParserLimits, so we
+            # wrap LLMatcher construction (see _patch_llguidance_limits) -- and
+            # grammar compilation must therefore run in THIS process, not a
+            # spawned EngineCore child, hence in-process engine mode.
+            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+            _patch_llguidance_limits()
+            print("Enabled per-document span-grammar constrained decoding "
+                  "(llguidance substring, backend=guidance, raised parser limits).")
         self.llm = LLM(
             model=model_name,
             dtype=dtype,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
+            **llm_kwargs,
         )
         # Use the context length the engine actually settled on (it may cap the
         # requested value to what fits in the KV cache), so passage truncation
@@ -172,14 +202,20 @@ class VLLMGenerator:
             print("Enabled vLLM guided JSON decoding for the 'spans' schema.")
         self.sampling_params = SamplingParams(**sampling_kwargs)
 
-    def _format_prompt(self, system_prompt, user_prompt):
+    def _prompt_ids(self, system_prompt, user_prompt):
+        """Chat-formatted prompt as TOKEN IDS, never as a re-tokenized string.
+        For tokenizers like Ministral's MistralCommonBackend the text round-trip
+        is lossy: control tokens ([INST], <s>) in the tokenize=False string are
+        re-encoded as plain text pieces, the model sees a mangled prompt, and
+        under free decoding answers with an immediate EOS (= empty output for
+        every sample). tokenize=True is the safe path for every backend."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         try:
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+            ids = self.tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True
             )
         except Exception:
             # Some chat templates (e.g. Gemma) reject a standalone system role;
@@ -188,9 +224,12 @@ class VLLMGenerator:
                 "role": "user",
                 "content": f"{system_prompt}\n\n{user_prompt}",
             }]
-            return self.tokenizer.apply_chat_template(
-                merged, tokenize=False, add_generation_prompt=True
+            ids = self.tokenizer.apply_chat_template(
+                merged, tokenize=True, add_generation_prompt=True
             )
+        # Fast tokenizers return a plain id list; MistralCommonBackend returns
+        # a BatchEncoding -- unwrap to the id list either way.
+        return ids if isinstance(ids, list) else ids["input_ids"]
 
     def _resolve_max_model_len(self, fallback):
         """Read the context length the vLLM engine actually uses (it can cap the
@@ -208,9 +247,6 @@ class VLLMGenerator:
                 pass
         return fallback
 
-    def _ntokens(self, formatted_prompt):
-        return len(self.tokenizer(formatted_prompt, add_special_tokens=False)["input_ids"])
-
     def fit_prompt(self, template, record):
         """Render ``(system, user)`` for one record, truncating ONLY the passage
         (keeping the instructions and query intact) so the formatted prompt plus
@@ -218,8 +254,11 @@ class VLLMGenerator:
         would otherwise abort the whole run with a context-length error are cut
         down here instead.
 
-        Returns ``(system, user, meta)`` where ``meta`` carries per-sample token
-        stats for the output dataset:
+        Returns ``(system, user, meta, psg_sent)`` where ``psg_sent`` is the
+        passage text actually placed in the prompt (None when the record has no
+        passage) -- span-grammar decoding constrains outputs to substrings of
+        exactly this text -- and ``meta`` carries per-sample token stats for
+        the output dataset:
           - ``was_truncated``:            whether the passage was cut to fit
           - ``document_tokens``:          passage token count before truncation
           - ``document_tokens_truncated``: passage token count actually sent
@@ -229,10 +268,11 @@ class VLLMGenerator:
         meaningful cost to generation.
         """
         system, user = create_message(template, **record)
-        prompt_tokens = self._ntokens(self._format_prompt(system, user))
+        prompt_tokens = len(self._prompt_ids(system, user))
 
         has_psg = self.psg_key in record
-        psg_ids = (self.tokenizer(record[self.psg_key], add_special_tokens=False)["input_ids"]
+        original_psg = record.get(self.psg_key) if has_psg else None
+        psg_ids = (self.tokenizer(original_psg, add_special_tokens=False)["input_ids"]
                    if has_psg else [])
         doc_tokens_full = len(psg_ids) if has_psg else None
 
@@ -247,29 +287,148 @@ class VLLMGenerator:
         budget = (self.max_model_len - self.max_gen_tokens - self.TRUNC_MARGIN
                   if self.max_model_len else None)
         if budget is None or prompt_tokens <= budget or not has_psg:
-            return system, user, meta(False, doc_tokens_full)
+            return system, user, meta(False, doc_tokens_full), original_psg
 
         # Trim the passage token count by (overflow + margin), then re-render and
         # re-check a few times to converge despite tokenizer boundary effects.
+        # The decoded token prefix is snapped to a true CHARACTER prefix of the
+        # original passage, so that the prompt passage (and hence any span
+        # constrained to it) is guaranteed to be a verbatim substring of the
+        # passage stored in the output dataset.
         keep = max(0, doc_tokens_full - (prompt_tokens - budget) - self.TRUNC_MARGIN)
+        trimmed_psg = ""
         for _ in range(5):
+            decoded = self.tokenizer.decode(psg_ids[:keep])
+            trimmed_psg = original_psg[:_common_prefix_len(original_psg, decoded)]
             trimmed = dict(record)
-            trimmed[self.psg_key] = self.tokenizer.decode(psg_ids[:keep])
+            trimmed[self.psg_key] = trimmed_psg
             system, user = create_message(template, **trimmed)
-            prompt_tokens = self._ntokens(self._format_prompt(system, user))
+            prompt_tokens = len(self._prompt_ids(system, user))
             if prompt_tokens <= budget or keep <= 0:
                 break
             keep = max(0, keep - (prompt_tokens - budget) - self.TRUNC_MARGIN)
 
         self._n_truncated += 1
-        return system, user, meta(True, keep)
+        return system, user, meta(True, keep), trimmed_psg
 
-    def generate(self, prompts):
+    # Grammar-level cap on spans per sample. Legitimate outputs are far below
+    # it (p90 ~5 spans), but ~6% of samples otherwise loop greedily repeating
+    # spans until the 8K-token budget, dominating batch wall-time (observed up
+    # to 908 spans / 33K chars in one sample).
+    MAX_SPANS = 32
+
+    def _span_grammar(self, doc):
+        """llguidance lark grammar: up to MAX_SPANS spans, each a verbatim
+        contiguous substring of ``doc``, wrapped in <s>...</s> lines inside a
+        <spans>...</spans> envelope (JSON cannot hold raw document text
+        verbatim -- quotes/newlines would need escaping)."""
+        return (
+            f'start: "<spans>\\n" item{{0,{self.MAX_SPANS}}} "</spans>"\n'
+            f'item: "<s>" %regex{{"substring_chars": {json.dumps(doc)}}} "</s>" "\\n"'
+        )
+
+    def _span_params(self, doc):
+        """Per-request SamplingParams constraining decoding to spans of ``doc``."""
+        from vllm.sampling_params import StructuredOutputsParams
+        return SamplingParams(
+            temperature=0.0,
+            max_tokens=self.max_gen_tokens,
+            structured_outputs=StructuredOutputsParams(grammar=self._span_grammar(doc)),
+        )
+
+    def generate(self, prompts, constraint_texts=None):
         """Batched generation. ``prompts`` is a list of (system, user) pairs;
-        returns raw content strings aligned to it."""
-        formatted = [self._format_prompt(system, user) for system, user in prompts]
-        outputs = self.llm.generate(formatted, self.sampling_params)
+        returns content strings aligned to it. With span-grammar decoding,
+        ``constraint_texts`` supplies the per-prompt document each output must
+        be a substring of, and outputs are converted to the canonical spans
+        JSON."""
+        token_prompts = [{"prompt_token_ids": self._prompt_ids(system, user)}
+                         for system, user in prompts]
+        if self.span_grammar:
+            assert constraint_texts is not None and len(constraint_texts) == len(prompts)
+            per_prompt = [self._span_params(doc or "") for doc in constraint_texts]
+            outputs = self.llm.generate(token_prompts, per_prompt)
+        else:
+            outputs = self.llm.generate(token_prompts, self.sampling_params)
+        # Delimiter-format output is stored RAW; parse_span_text_format converts
+        # it at read time (get_all_responses.decode_one), so batch files keep
+        # the verbatim model output for format-compliance analysis.
         return [output.outputs[0].text for output in outputs]
+
+
+def parse_span_text_format(text):
+    """Extract spans from the delimiter output format (<s>...</s> items inside
+    a <spans>...</spans> envelope). Empty <s></s> items carry no content (the
+    substring grammar admits the empty string) and are dropped."""
+    return [s for s in re.findall(r"<s>(.*?)</s>", text, flags=re.S) if s]
+
+
+def _common_prefix_len(a, b):
+    """Length of the common character prefix of two strings; bisection with
+    C-speed slice comparisons, so it is fast even on 250KB passages."""
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _patch_llguidance_limits():
+    """Raise llguidance's parser limits for every LLMatcher construction.
+
+    The default ``initial_lexer_fuel`` (1M) rejects per-document substring
+    grammars for documents beyond ~200KB with "initial lexer configuration
+    (grammar) too big", and vLLM's guidance backend constructs LLMatcher
+    without exposing ``LLParserLimits``. Verified on the largest eval document
+    (231KB constraint text): fuel=100M compiles in 0.7s with ~0.1ms/token
+    masks. Only takes effect in processes that run this function -- pair with
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 so grammar compilation happens in-process.
+    """
+    import llguidance
+    if getattr(llguidance, "_fgr_limits_patched", False):
+        return
+    fuel = int(os.environ.get("LLGUIDANCE_INITIAL_LEXER_FUEL", "100000000"))
+    orig = llguidance.LLMatcher
+
+    def make_limits():
+        return llguidance.LLParserLimits(
+            initial_lexer_fuel=fuel,
+            max_lexer_states=10_000_000,
+            max_grammar_size=10_000_000,
+        )
+
+    class _LLMatcherWithLimits:
+        """Callable proxy: construction AND the validate_grammar staticmethods
+        (vLLM validates each request's grammar with them before compiling)
+        inject the raised limits; everything else is delegated."""
+
+        def __call__(self, *args, **kwargs):
+            kwargs.setdefault("limits", make_limits())
+            return orig(*args, **kwargs)
+
+        def validate_grammar(self, *args, **kwargs):
+            # vLLM validates every request's grammar by compiling it once, then
+            # the manager compiles it again -- for our large templated substring
+            # grammars that doubles a ~0.5s/request cost for no benefit, so skip
+            # the validation compile for them (compile errors still surface in
+            # the manager).
+            if args and isinstance(args[0], str) and "substring_chars" in args[0]:
+                return ""
+            kwargs.setdefault("limits", make_limits())
+            return orig.validate_grammar(*args, **kwargs)
+
+        def validate_grammar_with_warnings(self, *args, **kwargs):
+            kwargs.setdefault("limits", make_limits())
+            return orig.validate_grammar_with_warnings(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(orig, name)
+
+    llguidance.LLMatcher = _LLMatcherWithLimits()
+    llguidance._fgr_limits_patched = True
 
 
 def template_base_path(template_file):
@@ -495,13 +654,22 @@ def get_all_responses(generated_data_dir):
 
     def decode_one(v):
         if type(v) is str:
+            # JSON first ({"spans": [...]}, incl. batch files written by older
+            # runs); a verbatim span may itself contain "<s>", so the delimiter
+            # parse must never run on already-JSON content.
             try:
                 object = json.loads(v)
                 if 'spans' in object:
                     return object
             except json.JSONDecodeError:
-                nonlocal json_decode_error
-                json_decode_error += 1
+                pass
+            # Delimiter format (<spans>/<s>...</s>), stored raw so that format
+            # compliance stays analyzable for unconstrained ablation runs.
+            spans = parse_span_text_format(v)
+            if spans or v.strip().startswith("<spans>"):
+                return {'spans': spans}
+            nonlocal json_decode_error
+            json_decode_error += 1
         return {'spans': []}
 
     # Create new list by sorting with keys - rowid, needed to match input
@@ -544,11 +712,13 @@ def generate_one_batch_vllm(data_chunk, generation_api, jsonl_filename, template
     # object write_output later splats into the final row (see create_minibatch),
     # so was_truncated / *_tokens land in the output dataset with no extra pass.
     prompts = []
+    constraint_texts = []
     for row_id in row_ids:
-        system, user, meta = generation_api.fit_prompt(template, data_chunk[row_id])
+        system, user, meta, psg_sent = generation_api.fit_prompt(template, data_chunk[row_id])
         prompts.append((system, user))
+        constraint_texts.append(psg_sent)
         data_chunk[row_id].update(meta)
-    contents = generation_api.generate(prompts)
+    contents = generation_api.generate(prompts, constraint_texts)
     write_batch_output(jsonl_filename, (
         (row_id, {'message': {'content': content}})
         for row_id, content in zip(row_ids, contents)
@@ -807,6 +977,16 @@ def get_args():
                         help="Max tokens to generate per sample (vLLM offline path).")
     parser.add_argument('--vllm_guided_json', action='store_true',
                         help="Constrain vLLM output to the {'spans': [str, ...]} JSON schema.")
+    parser.add_argument('--vllm_span_grammar', action='store_true',
+                        help="Constrain vLLM decoding so every generated span is a verbatim "
+                             "contiguous substring of its own (possibly truncated) passage "
+                             "(llguidance substring grammar, per request). Mutually exclusive "
+                             "with --vllm_guided_json; use the *-constrained templates.")
+    parser.add_argument('--span_text_format', action='store_true',
+                        help="Parse the delimiter output format (<spans>/<s>...</s>) into the "
+                             "canonical spans JSON WITHOUT the decoding constraint -- the "
+                             "unconstrained ablation for the same prompt. Implied by "
+                             "--vllm_span_grammar.")
 
     return parser.parse_args()
 
@@ -826,6 +1006,8 @@ def main():
                 max_gen_tokens=args.max_gen_tokens,
                 guided_json=args.vllm_guided_json,
                 psg_key=args.psg_key,
+                span_grammar=args.vllm_span_grammar,
+                span_format=args.span_text_format,
             )
         else:
             generation_api = OpenAIGenerator(
