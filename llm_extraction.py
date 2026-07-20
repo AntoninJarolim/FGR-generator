@@ -1031,6 +1031,12 @@ def main():
     template_name = os.path.basename(template_base_path(args.template_file))
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
+    # For native vLLM runs, keep guided-JSON (constrained) and free-form
+    # (unconstrained) decoding outputs in separate dirs so the two modes don't
+    # overwrite each other's raw batches or final extracted_relevancy file.
+    # Only vLLM has this distinction; leave ollama/openai paths unchanged.
+    if args.generation_client == 'vllm':
+        batch_dir += "_constrained" if args.vllm_guided_json else "_unconstrained"
     generated_data_dir = os.path.join(args.generate_into_dir, template_name, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists

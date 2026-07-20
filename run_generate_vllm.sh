@@ -122,6 +122,18 @@ echo "Using CUDA_HOME=$CUDA_HOME"
 # sampler, which needs no runtime compilation.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
+# Constrained (guided-JSON) vs unconstrained (free-form) decoding is selected
+# with GUIDED_JSON: 1 (default) constrains output to the spans schema, 0 drops
+# the flag for free-form generation. llm_extraction.py writes the two modes to
+# separate _constrained/_unconstrained dirs so they never collide.
+GUIDED_ARGS=()
+if [ "${GUIDED_JSON:-1}" -eq 1 ]; then
+  GUIDED_ARGS=(--vllm_guided_json)
+  echo "Decoding mode: CONSTRAINED (guided JSON)."
+else
+  echo "Decoding mode: UNCONSTRAINED (free-form)."
+fi
+
 for MODEL_NAME in "${MODELS[@]}"; do
     echo "Running llm_extraction.py (vLLM offline) with model: $MODEL_NAME"
     "$PYTHON" llm_extraction.py \
@@ -135,6 +147,7 @@ for MODEL_NAME in "${MODELS[@]}"; do
         --max_gen_tokens 8192 \
         --vllm_gpu_memory_utilization 0.9 \
         "${MODE_ARGS[@]}" \
+        "${GUIDED_ARGS[@]}" \
         --skip-regeneration \
         "${DRY_RUN_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"
