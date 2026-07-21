@@ -27,7 +27,12 @@
     background: #eef0f3; border: 1px solid var(--border); border-radius: 3px;
     padding: 0 4px; font-size: 11px; color: var(--muted);
   }
-  #models { display: flex; gap: 6px; flex-wrap: wrap; }
+  #models { display: flex; gap: 4px 18px; flex-wrap: wrap; align-items: center; }
+  .model-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .model-group .group-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); white-space: nowrap;
+  }
   .model-chip {
     display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
     border: 1px solid var(--border); border-radius: 14px; cursor: pointer;
@@ -147,8 +152,11 @@
 const $ = id => document.getElementById(id);
 const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const fmt = n => n.toLocaleString("en-US");
+// Resolve API calls relative to wherever the page is mounted, so the viewer
+// also works behind a path-prefixing reverse proxy (e.g. https://host/fgr-data/).
+const API_BASE = location.pathname.replace(/index\.html$/, "").replace(/\/*$/, "/");
 const api = async (path, params) => {
-  const url = path + "?" + new URLSearchParams(params);
+  const url = API_BASE + path.replace(/^\//, "") + "?" + new URLSearchParams(params);
   const res = await fetch(url);
   if (!res.ok) throw new Error((await res.json()).error || res.statusText);
   return res.json();
@@ -162,6 +170,11 @@ const S = {
 };
 const filters = () => ({ q: $("search").value, subset: $("subset").value, flag: $("flag").value });
 const shortName = f => f.replace(/^.*\//, "").replace(/\.jsonl$/, "");
+const dirOf = f => f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
+const modelName = f => shortName(f).replace(/_from\d+-to\d+$/, "");
+// "model · technique-dir" label used for column titles when comparing files
+// of the same model across prompting techniques.
+const colLabel = f => modelName(f) + (dirOf(f) ? ` <span class="badge">${esc(dirOf(f))}</span>` : "");
 
 // ---------- model selection ----------
 async function loadFiles() {
@@ -172,20 +185,43 @@ async function loadFiles() {
 }
 function renderModels() {
   $("models").innerHTML = "";
+  // One labeled group per directory = per prompting technique (e.g.
+  // long-embed-constrained vs long-embed-unconstrained), so the same model
+  // can be toggled on in several techniques and compared column by column.
+  const groups = new Map();
   for (const f of S.files) {
-    const on = S.selected.includes(f.name);
-    const div = document.createElement("span");
-    div.className = "model-chip" + (on ? " on" : "") + (S.selected[0] === f.name ? " primary" : "");
-    div.innerHTML = `${esc(shortName(f.name))} <small>${(f.size / 1e6).toFixed(0)}MB${f.rows != null ? " · " + fmt(f.rows) : ""}</small>`;
-    div.title = f.name + (S.selected[0] === f.name ? " (primary: drives the record list)" : "");
-    div.onclick = () => {
-      const i = S.selected.indexOf(f.name);
-      if (i >= 0) S.selected.splice(i, 1); else S.selected.push(f.name);
-      renderModels();
-      if (i === 0) resetList();          // primary changed
-      else if (S.curIdx != null) openRecord(S.curIdx);  // just add/remove a column
-    };
-    $("models").appendChild(div);
+    const dir = dirOf(f.name);
+    if (!groups.has(dir)) groups.set(dir, []);
+    groups.get(dir).push(f);
+  }
+  for (const [dir, files] of groups) {
+    const g = document.createElement("span");
+    g.className = "model-group";
+    if (dir) {
+      const lbl = document.createElement("span");
+      lbl.className = "group-label";
+      lbl.textContent = dir;
+      g.appendChild(lbl);
+    }
+    const stems = files.map(f => modelName(f.name));
+    for (const f of files) {
+      // Same model twice in a group (partial runs) keeps the fromX-toY suffix.
+      const dupe = stems.filter(s => s === modelName(f.name)).length > 1;
+      const on = S.selected.includes(f.name);
+      const div = document.createElement("span");
+      div.className = "model-chip" + (on ? " on" : "") + (S.selected[0] === f.name ? " primary" : "");
+      div.innerHTML = `${esc(dupe ? shortName(f.name) : modelName(f.name))} <small>${(f.size / 1e6).toFixed(0)}MB${f.rows != null ? " · " + fmt(f.rows) : ""}</small>`;
+      div.title = f.name + (S.selected[0] === f.name ? " (primary: drives the record list)" : "");
+      div.onclick = () => {
+        const i = S.selected.indexOf(f.name);
+        if (i >= 0) S.selected.splice(i, 1); else S.selected.push(f.name);
+        renderModels();
+        if (i === 0) resetList();          // primary changed
+        else if (S.curIdx != null) openRecord(S.curIdx);  // just add/remove a column
+      };
+      g.appendChild(div);
+    }
+    $("models").appendChild(g);
   }
 }
 
@@ -396,7 +432,7 @@ function renderColumn(name, rec) {
   const col = document.createElement("div");
   col.className = "col";
   if (!rec) {
-    col.innerHTML = `<div class="colTop"><div class="colHead"><div class="colTitle">${esc(shortName(name))}</div></div></div>
+    col.innerHTML = `<div class="colTop"><div class="colHead"><div class="colTitle">${colLabel(name)}</div></div></div>
                      <div class="missing">record not found in this file</div>`;
     return col;
   }
@@ -428,7 +464,7 @@ function renderColumn(name, rec) {
 
   col.innerHTML = `
     <div class="colTop">
-      <div class="colHead"><div class="colTitle">${esc(shortName(name))}</div><div class="stats">${stats.join("")}</div></div>
+      <div class="colHead"><div class="colTitle">${colLabel(name)}</div><div class="stats">${stats.join("")}</div></div>
       <div class="spans">${chips || '<span class="badge empty">no spans</span>'}</div>
     </div>
     <div class="passage"></div>`;

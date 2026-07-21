@@ -185,8 +185,9 @@ class JsonlIndex:
 class Registry:
     """Discovers output files under the data dir and caches their indexes."""
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, include=""):
         self.data_dir = os.path.abspath(data_dir)
+        self.include = include
         self.indexes = {}
         self.lock = threading.Lock()
 
@@ -197,6 +198,8 @@ class Registry:
                 if fn.endswith(".jsonl"):
                     full = os.path.join(root, fn)
                     rel = os.path.relpath(full, self.data_dir)
+                    if self.include and self.include not in rel:
+                        continue
                     found.append({
                         "name": rel,
                         "size": os.path.getsize(full),
@@ -344,11 +347,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
                         help="Directory scanned (recursively) for *.jsonl output files.")
+    parser.add_argument("--include", default="long-embed",
+                        help="Only list files whose path (relative to --data-dir) contains this "
+                             "substring; matches e.g. long-embed, long-embed-constrained, "
+                             "long-embed-unconstrained. Pass '' to list everything.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
     args = parser.parse_args()
 
-    REGISTRY = Registry(args.data_dir)
+    REGISTRY = Registry(args.data_dir, include=args.include)
 
     # Pre-warm every file's index in the background so first interactions are
     # instant. With a valid sidecar cache each file loads in <1 s; otherwise it
