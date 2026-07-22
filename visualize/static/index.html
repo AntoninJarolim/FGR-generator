@@ -74,6 +74,11 @@
   #recHeader .queryLabel { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   #recHeader .query { font-size: 15px; font-weight: 600; margin: 2px 0 6px; }
   #recHeader .ids { color: var(--muted); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  #recHeader .gold { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+  #recHeader .goldLabel { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  #recHeader .goldAnswers { display: flex; flex-wrap: wrap; gap: 5px; }
+  #recHeader .goldAns { background: #dcfce7; color: #15803d; padding: 2px 9px; border-radius: 11px; font-size: 12px; }
+  #recHeader .goldNone { color: var(--muted); font-size: 12px; font-style: italic; }
 
   #cols { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 12px; grid-template-columns: repeat(var(--ncols, 1), minmax(340px, 1fr)); align-items: start; }
   .col { background: var(--card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; min-width: 0; }
@@ -81,12 +86,13 @@
      syncColTops), the spans area absorbs the extra space and the passage text
      below starts at the same y in every column. */
   .colTop { position: sticky; top: 0; z-index: 5; background: var(--card); border-radius: 8px 8px 0 0; box-shadow: 0 2px 4px rgba(0,0,0,.05); display: flex; flex-direction: column; }
-  .colTop .spans { flex: 1; align-content: flex-start; }
+  .colTop .spans { flex: 1 1 auto; align-content: flex-start; }
   .colTop .colHead { padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .col .colTitle { font-weight: 600; margin-bottom: 4px; word-break: break-all; }
   .col .stats { display: flex; gap: 5px; flex-wrap: wrap; }
-  /* Cap at ~two chip rows (chip ~23px + 5px gap + 16px padding); more scroll. */
-  .col .spans { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 5px; max-height: 68px; overflow-y: auto; }
+  /* Defaults to ~two chip rows (chip ~23px + 5px gap + 16px padding); overflow
+     scrolls, and `resize: vertical` lets the user drag the box taller. */
+  .col .spans { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 5px; height: 68px; min-height: 34px; overflow: auto; resize: vertical; }
   .chip {
     display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
     padding: 2px 8px; border-radius: 11px; font-size: 12px; cursor: pointer; border: 1px solid transparent;
@@ -488,6 +494,21 @@ function renderColumn(name, rec) {
   return col;
 }
 
+// Gold QA answers (joined by subset+qid, see eval/fetch_gold_answers.py).
+// Only rendered when a gold answer was actually joined for this query;
+// subsets without gold (or unjoined misses) show nothing.
+function goldHtml(gold) {
+  if (!gold || !gold.found || !gold.answers.length) return "";
+  const amb = gold.ambiguous
+    ? ` <span class="badge trunc" title="question text matched >1 gold doc — union of answers">ambiguous</span>`
+    : "";
+  const docs = gold.n_gold_docs > 1 ? ` <span class="badge">${gold.n_gold_docs} gold docs</span>` : "";
+  return `<div class="gold">
+    <div class="goldLabel">gold answers${amb}${docs}</div>
+    <div class="goldAnswers">${gold.answers.map(a => `<span class="goldAns">${esc(a)}</span>`).join("")}</div>
+  </div>`;
+}
+
 let openSeq = 0;
 async function openRecord(idx) {
   const seq = ++openSeq;
@@ -500,8 +521,11 @@ async function openRecord(idx) {
   if (seq !== openSeq) return;
   const rec = primary.record;
   const key = [rec.subset, rec.qid, rec.doc_id].join("|");
+  const goldP = api("/api/gold", { subset: rec.subset, qid: rec.qid })
+    .catch(() => ({ found: false, answers: [] }));
   const others = await Promise.all(S.selected.slice(1).map(f =>
     api("/api/recordByKey", { file: f, key }).catch(() => ({ record: null }))));
+  const gold = await goldP;
   if (seq !== openSeq) return;
 
   $("placeholder").hidden = true;
@@ -509,7 +533,8 @@ async function openRecord(idx) {
   h.hidden = false;
   h.innerHTML = `<div class="queryLabel">query</div><div class="query">${esc(rec.query || "")}</div>
     <div class="ids"><span>#${idx}</span><span>subset: ${esc(String(rec.subset))}</span>
-    <span>qid: ${esc(String(rec.qid))}</span><span>doc_id: ${esc(String(rec.doc_id))}</span></div>`;
+    <span>qid: ${esc(String(rec.qid))}</span><span>doc_id: ${esc(String(rec.doc_id))}</span></div>
+    ${goldHtml(gold)}`;
 
   const cols = $("cols");
   cols.innerHTML = "";

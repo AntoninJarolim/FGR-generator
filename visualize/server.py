@@ -228,7 +228,37 @@ class Registry:
         return JsonlIndex(full, os.path.join(CACHE_DIR, cache_name))
 
 
-REGISTRY = None  # set in main()
+REGISTRY = None    # set in main()
+GOLD_PATH = None   # set in main(): path to data/eval/gold_answers.jsonl
+GOLD_ANSWERS = None
+GOLD_LOCK = threading.Lock()
+
+
+def load_gold():
+    """Lazily load gold_answers.jsonl into a {(subset, qid): record} map.
+
+    The file is small (a few MB) and produced by eval/fetch_gold_answers.py;
+    one record per (subset, qid) including misses. Loaded once, then cached.
+    """
+    global GOLD_ANSWERS
+    with GOLD_LOCK:
+        if GOLD_ANSWERS is not None:
+            return GOLD_ANSWERS
+        gold = {}
+        if GOLD_PATH and os.path.isfile(GOLD_PATH):
+            with open(GOLD_PATH, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    gold[(rec.get("subset"), rec.get("qid"))] = rec
+            print(f"[gold] loaded {len(gold)} records from {GOLD_PATH}")
+        else:
+            print(f"[gold] no gold-answers file at {GOLD_PATH}")
+        GOLD_ANSWERS = gold
+        return GOLD_ANSWERS
+
 
 FLAG_TESTS = {
     "truncated": lambda s: bool(s.get("was_truncated")),
@@ -333,6 +363,19 @@ class Handler(BaseHTTPRequestHandler):
         index = REGISTRY.get(params["file"])
         self._json({"file": params["file"], "groups": index.ensure_stats()})
 
+    def route_api_gold(self, params):
+        rec = load_gold().get((params.get("subset"), params.get("qid")))
+        if rec is None or rec.get("join") == "miss":
+            self._json({"found": False, "answers": []})
+        else:
+            self._json({
+                "found": True,
+                "answers": rec.get("answers") or [],
+                "ambiguous": bool(rec.get("ambiguous")),
+                "join": rec.get("join"),
+                "n_gold_docs": rec.get("n_gold_docs"),
+            })
+
     def route_api_recordByKey(self, params):
         index = REGISTRY.get(params["file"])
         idx = index.key_to_idx.get(params.get("key", ""))
@@ -343,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global REGISTRY
+    global REGISTRY, GOLD_PATH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
                         help="Directory scanned (recursively) for *.jsonl output files.")
@@ -351,11 +394,14 @@ def main():
                         help="Only list files whose path (relative to --data-dir) contains this "
                              "substring; matches e.g. long-embed, long-embed-constrained, "
                              "long-embed-unconstrained. Pass '' to list everything.")
+    parser.add_argument("--gold", default=os.path.join(REPO_ROOT, "data/eval/gold_answers.jsonl"),
+                        help="Gold QA answers (from eval/fetch_gold_answers.py), joined by (subset, qid).")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
     args = parser.parse_args()
 
     REGISTRY = Registry(args.data_dir, include=args.include)
+    GOLD_PATH = os.path.abspath(args.gold)
 
     # Pre-warm every file's index in the background so first interactions are
     # instant. With a valid sidecar cache each file loads in <1 s; otherwise it
