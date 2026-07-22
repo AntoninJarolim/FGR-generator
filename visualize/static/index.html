@@ -160,7 +160,7 @@ const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&
 const fmt = n => n.toLocaleString("en-US");
 // Resolve API calls relative to wherever the page is mounted, so the viewer
 // also works behind a path-prefixing reverse proxy (e.g. https://host/fgr-data/).
-const API_BASE = location.pathname.replace(/index\.html$/, "").replace(/\/*$/, "/");
+const API_BASE = location.pathname.replace(/(index\.html|viz)$/, "").replace(/\/*$/, "/");
 const api = async (path, params) => {
   const url = API_BASE + path.replace(/^\//, "") + "?" + new URLSearchParams(params);
   const res = await fetch(url);
