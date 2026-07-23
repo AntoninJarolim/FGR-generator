@@ -20,6 +20,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -312,6 +313,7 @@ class Handler(BaseHTTPRequestHandler):
         "/": "home.html",          # dashboard
         "/viz": "index.html",      # data viewer
         "/stats": "stats.html",    # span mismatch statistics
+        "/summary": "summary.html",  # span-extraction performance tables
     }
 
     def do_GET(self):
@@ -362,6 +364,19 @@ class Handler(BaseHTTPRequestHandler):
     def route_api_stats(self, params):
         index = REGISTRY.get(params["file"])
         self._json({"file": params["file"], "groups": index.ensure_stats()})
+
+    def route_api_summary(self, params):
+        # Span-extraction performance tables, built live from the eval JSON
+        # artifacts (data/eval/*.json) by eval/summary_table.build_summary —
+        # the same source the CLI table and the old markdown export used.
+        sys.path.insert(0, os.path.join(REPO_ROOT, "eval"))
+        from summary_table import build_summary
+        kwargs = {}
+        if params.get("plaus_key"):
+            kwargs["plaus_key"] = params["plaus_key"]
+        if params.get("compr_key"):
+            kwargs["compr_key"] = params["compr_key"]
+        self._json(build_summary(**kwargs))
 
     def route_api_gold(self, params):
         rec = load_gold().get((params.get("subset"), params.get("qid")))
