@@ -392,8 +392,8 @@ def main():
                         help="Directory scanned (recursively) for *.jsonl output files.")
     parser.add_argument("--include", default="long-embed",
                         help="Only list files whose path (relative to --data-dir) contains this "
-                             "substring; matches e.g. long-embed, long-embed-constrained, "
-                             "long-embed-unconstrained. Pass '' to list everything.")
+                             "substring; matches e.g. long-embed-json, long-embed-xml, "
+                             "long-embed-xml-constrained. Pass '' to list everything.")
     parser.add_argument("--gold", default=os.path.join(REPO_ROOT, "data/eval/gold_answers.jsonl"),
                         help="Gold QA answers (from eval/fetch_gold_answers.py), joined by (subset, qid).")
     parser.add_argument("--host", default="127.0.0.1")

@@ -3,26 +3,29 @@
 # inference. No server and no OPENAI_BASE_URL needed -- this loads the model
 # weights in-process, so it must run on a machine with a GPU.
 #
-# Uses span-grammar constrained decoding (every generated span is a verbatim
-# contiguous substring of its own document) + greedy sampling, skips the
-# span-not-found regeneration loop, and loops over the models below.
+# Emits the XML/delimiter span format (templates/long-embed-xml). By default it
+# runs UNCONSTRAINED (free decoding, delimiter parsing only); pass --constrained
+# to add per-document span-grammar decoding, which GUARANTEES every generated
+# span is a verbatim contiguous substring of its own document. Greedy sampling,
+# skips the span-not-found regeneration loop, loops over the models below.
 
 # Usage:
-#   ./run_generate_vllm.sh                  # full run
+#   ./run_generate_vllm.sh                  # full run, unconstrained
+#   ./run_generate_vllm.sh --constrained    # span-grammar constrained decoding
 #   ./run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
 #   ./run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
 # --- Argument parsing ---
-# --dry-run and --unconstrained are consumed here; everything else is
+# --dry-run and --constrained are consumed here; everything else is
 # forwarded to llm_extraction.py.
 DRY_RUN=0
-UNCONSTRAINED=0
+CONSTRAINED=0
 EXTRA_ARGS=()
 for arg in "$@"; do
   case $arg in
     --dry-run) DRY_RUN=1 ;;
-    --unconstrained) UNCONSTRAINED=1 ;;
+    --constrained) CONSTRAINED=1 ;;
     *) EXTRA_ARGS+=("$arg") ;;
   esac
 done
@@ -35,21 +38,21 @@ if [ "$DRY_RUN" -eq 1 ]; then
   DRY_RUN_ARGS=(--to_sample 10 --force_rewrite)
 fi
 
-# long-embed-constrained base -> loads templates/long-embed-constrained-system.template
-# + long-embed-constrained-user.template (delimiter-wrapped span output; together
-# with --vllm_span_grammar every generated span is GUARANTEED to be a verbatim
-# contiguous substring of its own document).
-#
-# --unconstrained runs the ablation for a fair comparison: the IDENTICAL prompt
-# (long-embed-unconstrained templates are byte-for-byte copies, under a
-# different name only so outputs land in a separate directory) with free
-# decoding -- no grammar -- and only the delimiter-format parsing kept.
-TEMPLATE_FILE="templates/long-embed-constrained.template"
-MODE_ARGS=(--vllm_span_grammar)
-if [ "$UNCONSTRAINED" -eq 1 ]; then
-  echo "UNCONSTRAINED ablation: same prompt, no decoding constraint."
-  TEMPLATE_FILE="templates/long-embed-unconstrained.template"
-  MODE_ARGS=(--span_text_format)
+# The template fixes only the OUTPUT FORMAT (long-embed-xml -> delimiter-wrapped
+# <spans>/<s> output); it never changes with the decoding mode. The CONSTRAINT
+# is orthogonal and set by --constrained:
+#   * default (unconstrained): free decoding, delimiter parsing only
+#     (--span_text_format) -> data/extracted_relevancy/long-embed-xml/
+#   * --constrained: per-document substring grammar (--vllm_span_grammar), every
+#     span guaranteed verbatim -> data/extracted_relevancy/long-embed-xml-constrained/
+# llm_extraction.py derives the "-constrained" output-dir suffix from the flag.
+TEMPLATE_FILE="templates/long-embed-xml.template"
+MODE_ARGS=(--span_text_format)
+if [ "$CONSTRAINED" -eq 1 ]; then
+  echo "CONSTRAINED: per-document span-grammar decoding (verbatim spans)."
+  MODE_ARGS=(--vllm_span_grammar)
+else
+  echo "UNCONSTRAINED (default): free decoding, delimiter parsing only."
 fi
 
 # HuggingFace model ids to loop over. Only models that fit in the local
@@ -122,18 +125,6 @@ echo "Using CUDA_HOME=$CUDA_HOME"
 # sampler, which needs no runtime compilation.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-# Constrained (guided-JSON) vs unconstrained (free-form) decoding is selected
-# with GUIDED_JSON: 1 (default) constrains output to the spans schema, 0 drops
-# the flag for free-form generation. llm_extraction.py writes the two modes to
-# separate _constrained/_unconstrained dirs so they never collide.
-GUIDED_ARGS=()
-if [ "${GUIDED_JSON:-1}" -eq 1 ]; then
-  GUIDED_ARGS=(--vllm_guided_json)
-  echo "Decoding mode: CONSTRAINED (guided JSON)."
-else
-  echo "Decoding mode: UNCONSTRAINED (free-form)."
-fi
-
 for MODEL_NAME in "${MODELS[@]}"; do
     echo "Running llm_extraction.py (vLLM offline) with model: $MODEL_NAME"
     "$PYTHON" llm_extraction.py \
@@ -147,7 +138,6 @@ for MODEL_NAME in "${MODELS[@]}"; do
         --max_gen_tokens 8192 \
         --vllm_gpu_memory_utilization 0.9 \
         "${MODE_ARGS[@]}" \
-        "${GUIDED_ARGS[@]}" \
         --skip-regeneration \
         "${DRY_RUN_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"

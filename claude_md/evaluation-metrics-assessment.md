@@ -149,7 +149,7 @@ From the full-data audit (all numbers verified on `data/extracted_relevancy/long
 4. **Generation-time document truncation**: ~49–53% of samples saw only a document prefix — spans can never come from the tail. This is a shared handicap but interacts with position-in-document analysis; the `was_truncated` meta is missing from con-12B (0/12,612) and partial in con-E4B (6,980/12,612) — recompute or join from the unconstrained files.
 5. **Joins must key on `(subset, qid, doc_id)`** — qid/doc_id values collide across subsets.
 6. **No char offsets stored** — recover via `passage.find(span)` (verified 0 mismatches for constrained outputs; `custom_utils/text_utils.py:find_span` exists); first occurrence is ambiguous for repeated text — acceptable for context windows, document it.
-7. **Old `long-embed` JSON runs are superseded** (28.7–50.4% non-verbatim; glm file has non-string spans) — exclude from all metrics.
+7. **Old unconstrained `long-embed-json` prompt runs are superseded** (28.7–50.4% non-verbatim; glm file has non-string spans) — exclude from all metrics. (Note: the JSON-*constrained* large-model runs in `long-embed-json-constrained` are a separate, current arm.)
 
 ---
 

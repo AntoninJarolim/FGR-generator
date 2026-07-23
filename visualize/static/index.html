@@ -191,8 +191,8 @@ async function loadFiles() {
 }
 function renderModels() {
   $("models").innerHTML = "";
-  // One labeled group per directory = per prompting technique (e.g.
-  // long-embed-constrained vs long-embed-unconstrained), so the same model
+  // One labeled group per directory = per format/constraint combo (e.g.
+  // long-embed-xml vs long-embed-xml-constrained), so the same model
   // can be toggled on in several techniques and compared column by column.
   const groups = new Map();
   for (const f of S.files) {

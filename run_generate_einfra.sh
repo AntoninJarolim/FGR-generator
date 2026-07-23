@@ -31,8 +31,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   DRY_RUN_ARGS=(--to_sample 10 --force_rewrite)
 fi
 
-# long-embed base -> loads templates/long-embed-system.template + long-embed-user.template
-TEMPLATE_FILE="templates/long-embed.template"
+# long-embed-json base -> loads templates/long-embed-json-system.template +
+# long-embed-json-user.template (JSON-object span output). This API path decodes
+# freely (no guided JSON), so outputs land in data/extracted_relevancy/long-embed-json/.
+TEMPLATE_FILE="templates/long-embed-json.template"
 
 # Models served by the e-INFRA CZ API.
 EINFRA_MODELS=(

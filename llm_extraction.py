@@ -929,10 +929,13 @@ def get_args():
                         help="Config/subset name when --input_data_name is a HuggingFace dataset.")
     parser.add_argument('--generate_into_dir', type=str, default="data/generated",
                         help="Directory for storing raw LLM batch outputs and their fixes.")
-    parser.add_argument('--template_file', type=str, default='templates/long-embed.template',
+    parser.add_argument('--template_file', type=str, default='templates/long-embed-json.template',
                         help="Base path to the prompt template. Both '<base>-system.template' "
                              "and '<base>-user.template' are always loaded (e.g. "
-                             "templates/long-embed.template -> long-embed-system/user).")
+                             "templates/long-embed-json.template -> long-embed-json-system/user). "
+                             "The template defines the output FORMAT (long-embed-json vs "
+                             "long-embed-xml); the decoding CONSTRAINT is orthogonal (see "
+                             "--vllm_span_grammar / --vllm_guided_json).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
 
@@ -976,12 +979,14 @@ def get_args():
     parser.add_argument('--max_gen_tokens', type=int, default=4096,
                         help="Max tokens to generate per sample (vLLM offline path).")
     parser.add_argument('--vllm_guided_json', action='store_true',
-                        help="Constrain vLLM output to the {'spans': [str, ...]} JSON schema.")
+                        help="Constrain vLLM output to the {'spans': [str, ...]} JSON schema "
+                             "(constrained decoding for the long-embed-json format).")
     parser.add_argument('--vllm_span_grammar', action='store_true',
                         help="Constrain vLLM decoding so every generated span is a verbatim "
                              "contiguous substring of its own (possibly truncated) passage "
-                             "(llguidance substring grammar, per request). Mutually exclusive "
-                             "with --vllm_guided_json; use the *-constrained templates.")
+                             "(llguidance substring grammar, per request; constrained decoding "
+                             "for the long-embed-xml format). Mutually exclusive with "
+                             "--vllm_guided_json. Either flag routes output to a '-constrained' dir.")
     parser.add_argument('--span_text_format', action='store_true',
                         help="Parse the delimiter output format (<spans>/<s>...</s>) into the "
                              "canonical spans JSON WITHOUT the decoding constraint -- the "
@@ -1028,16 +1033,20 @@ def main():
                                  hf_split=args.hf_split, hf_config=args.hf_config)
 
     # Prepare out data file
+    #
+    # The output directory is keyed on TWO orthogonal axes:
+    #   * format     -- the template basename (long-embed-json / long-embed-xml)
+    #   * constraint -- constrained decoding (JSON-schema guided or per-document
+    #                   span grammar) writes to a sibling "-constrained" dir;
+    #                   unconstrained / free decoding uses the bare format dir.
+    # So the four combinations land in long-embed-json, long-embed-json-constrained,
+    # long-embed-xml, and long-embed-xml-constrained -- never a filename suffix.
     template_name = os.path.basename(template_base_path(args.template_file))
+    constrained = args.vllm_guided_json or args.vllm_span_grammar
+    mode_dir = f"{template_name}-constrained" if constrained else template_name
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
-    # For native vLLM runs, keep guided-JSON (constrained) and free-form
-    # (unconstrained) decoding outputs in separate dirs so the two modes don't
-    # overwrite each other's raw batches or final extracted_relevancy file.
-    # Only vLLM has this distinction; leave ollama/openai paths unchanged.
-    if args.generation_client == 'vllm':
-        batch_dir += "_constrained" if args.vllm_guided_json else "_unconstrained"
-    generated_data_dir = os.path.join(args.generate_into_dir, template_name, batch_dir)
+    generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
         generated_ids = prepare_out_dir(generated_data_dir, args.force_rewrite)
@@ -1053,7 +1062,7 @@ def main():
     responses_out = get_all_responses(generated_data_dir)
 
     # Remove file if exists
-    output_data_file = f"data/extracted_relevancy/{template_name}/{batch_dir}.jsonl"
+    output_data_file = f"data/extracted_relevancy/{mode_dir}/{batch_dir}.jsonl"
     os.makedirs(os.path.dirname(output_data_file), exist_ok=True)
 
     print(f"Saving output data to {output_data_file}")
