@@ -39,7 +39,7 @@
 </head>
 <body>
 <header>
-  <a class="home" href="/" title="dashboard">⌂</a>
+  <a class="home" href="." title="dashboard">⌂</a>
   <h1>FGR-SPAN-EXTRACTION-PERFORMANCE — evaluation results per subset</h1>
 </header>
 <main>
@@ -59,7 +59,7 @@ async function main() {
   const noteEl = document.getElementById("note");
   let data;
   try {
-    data = await (await fetch("/api/summary")).json();
+    data = await (await fetch("api/summary")).json();
     if (data.error) throw new Error(data.error);
   } catch (e) {
     noteEl.textContent = "";

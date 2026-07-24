@@ -121,7 +121,7 @@
 </head>
 <body>
 <header>
-  <a href="/" title="dashboard" style="text-decoration:none;font-size:17px;color:var(--muted)">⌂</a>
+  <a href="." title="dashboard" style="text-decoration:none;font-size:17px;color:var(--muted)">⌂</a>
   <h1>FGR viewer</h1>
   <div id="models"></div>
   <div class="spacer"></div>
@@ -158,11 +158,14 @@
 const $ = id => document.getElementById(id);
 const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const fmt = n => n.toLocaleString("en-US");
-// Resolve API calls relative to wherever the page is mounted, so the viewer
-// also works behind a path-prefixing reverse proxy (e.g. https://host/fgr-data/).
-const API_BASE = location.pathname.replace(/(index\.html|viz)$/, "").replace(/\/*$/, "/");
+// All in-app URLs are relative (no leading "/"), so they resolve against the
+// page's own directory. That makes the viewer work unchanged at the server
+// root ("/viz"), behind a path-prefixing reverse proxy ("/fgr-data/viz"), or
+// at any other mount point -- the browser resolves "api/files" against
+// whatever prefix the page was served under. Never use absolute ("/api/...")
+// paths here: those escape the proxy prefix.
 const api = async (path, params) => {
-  const url = API_BASE + path.replace(/^\//, "") + "?" + new URLSearchParams(params);
+  const url = path.replace(/^\//, "") + "?" + new URLSearchParams(params);
   const res = await fetch(url);
   if (!res.ok) throw new Error((await res.json()).error || res.statusText);
   return res.json();
