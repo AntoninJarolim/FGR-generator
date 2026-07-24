@@ -93,21 +93,6 @@ class OpenAIGenerator:
                 time.sleep(self.RETRY_SLEEP_S)
 
 
-# JSON schema for the {"spans": [...]} contract that the downstream parser
-# (custom_utils/text_utils.find_spans / decode_one) expects: a list of verbatim
-# substring strings. Used for optional vLLM guided (constrained) decoding.
-SPANS_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "spans": {
-            "type": "array",
-            "items": {"type": "string"},
-        }
-    },
-    "required": ["spans"],
-}
-
-
 class VLLMGenerator:
     """Native vLLM offline batched inference (LLM / SamplingParams).
 
@@ -125,11 +110,9 @@ class VLLMGenerator:
 
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
-                 guided_json=False, psg_key='passage', span_grammar=False,
+                 psg_key='passage', span_grammar=False,
                  span_format=False):
 
-        if guided_json and span_grammar:
-            raise ValueError("--vllm_guided_json and --vllm_span_grammar are mutually exclusive.")
         # The delimiter output format (<spans>/<s>...</s>) is implied by the
         # grammar; it can also be requested alone (--span_text_format) for the
         # unconstrained ablation that uses the same prompt without the grammar.
@@ -185,21 +168,6 @@ class VLLMGenerator:
             temperature=0.0,
             max_tokens=max_gen_tokens,
         )
-        if guided_json:
-            # vLLM >=0.24 renamed GuidedDecodingParams -> StructuredOutputsParams
-            # and the SamplingParams field guided_decoding -> structured_outputs.
-            # Prefer the new API, fall back to the old for older vLLM.
-            try:
-                from vllm.sampling_params import StructuredOutputsParams
-                sampling_kwargs['structured_outputs'] = StructuredOutputsParams(
-                    json=SPANS_JSON_SCHEMA
-                )
-            except ImportError:
-                from vllm.sampling_params import GuidedDecodingParams
-                sampling_kwargs['guided_decoding'] = GuidedDecodingParams(
-                    json=SPANS_JSON_SCHEMA
-                )
-            print("Enabled vLLM guided JSON decoding for the 'spans' schema.")
         self.sampling_params = SamplingParams(**sampling_kwargs)
 
     def _prompt_ids(self, system_prompt, user_prompt):
@@ -935,7 +903,7 @@ def get_args():
                              "templates/long-embed-json.template -> long-embed-json-system/user). "
                              "The template defines the output FORMAT (long-embed-json vs "
                              "long-embed-xml); the decoding CONSTRAINT is orthogonal (see "
-                             "--vllm_span_grammar / --vllm_guided_json).")
+                             "--vllm_span_grammar).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
 
@@ -978,15 +946,11 @@ def get_args():
                         help="Model dtype for vLLM (e.g. auto, bfloat16, float16).")
     parser.add_argument('--max_gen_tokens', type=int, default=4096,
                         help="Max tokens to generate per sample (vLLM offline path).")
-    parser.add_argument('--vllm_guided_json', action='store_true',
-                        help="Constrain vLLM output to the {'spans': [str, ...]} JSON schema "
-                             "(constrained decoding for the long-embed-json format).")
     parser.add_argument('--vllm_span_grammar', action='store_true',
                         help="Constrain vLLM decoding so every generated span is a verbatim "
                              "contiguous substring of its own (possibly truncated) passage "
                              "(llguidance substring grammar, per request; constrained decoding "
-                             "for the long-embed-xml format). Mutually exclusive with "
-                             "--vllm_guided_json. Either flag routes output to a '-constrained' dir.")
+                             "for the long-embed-xml format). Routes output to a '-constrained' dir.")
     parser.add_argument('--span_text_format', action='store_true',
                         help="Parse the delimiter output format (<spans>/<s>...</s>) into the "
                              "canonical spans JSON WITHOUT the decoding constraint -- the "
@@ -1009,7 +973,6 @@ def main():
                 tensor_parallel_size=args.vllm_tensor_parallel_size,
                 dtype=args.vllm_dtype,
                 max_gen_tokens=args.max_gen_tokens,
-                guided_json=args.vllm_guided_json,
                 psg_key=args.psg_key,
                 span_grammar=args.vllm_span_grammar,
                 span_format=args.span_text_format,
@@ -1036,13 +999,14 @@ def main():
     #
     # The output directory is keyed on TWO orthogonal axes:
     #   * format     -- the template basename (long-embed-json / long-embed-xml)
-    #   * constraint -- constrained decoding (JSON-schema guided or per-document
-    #                   span grammar) writes to a sibling "-constrained" dir;
-    #                   unconstrained / free decoding uses the bare format dir.
-    # So the four combinations land in long-embed-json, long-embed-json-constrained,
-    # long-embed-xml, and long-embed-xml-constrained -- never a filename suffix.
+    #   * constraint -- per-document span-grammar decoding (--vllm_span_grammar)
+    #                   writes to a sibling "-constrained" dir; free decoding
+    #                   uses the bare format dir.
+    # Span grammar only applies to the XML span format, so the dirs produced are
+    # long-embed-json, long-embed-xml, and long-embed-xml-constrained -- never a
+    # filename suffix. (There is deliberately no JSON-constrained mode.)
     template_name = os.path.basename(template_base_path(args.template_file))
-    constrained = args.vllm_guided_json or args.vllm_span_grammar
+    constrained = args.vllm_span_grammar
     mode_dir = f"{template_name}-constrained" if constrained else template_name
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
