@@ -40,19 +40,19 @@ fi
 
 # The template fixes only the OUTPUT FORMAT (long-embed-xml -> delimiter-wrapped
 # <spans>/<s> output); it never changes with the decoding mode. The CONSTRAINT
-# is orthogonal and set by --constrained:
-#   * default (unconstrained): free decoding, delimiter parsing only
-#     (--span_text_format) -> data/extracted_relevancy/long-embed-xml/
-#   * --constrained: per-document substring grammar (--vllm_span_grammar), every
-#     span guaranteed verbatim -> data/extracted_relevancy/long-embed-xml-constrained/
-# llm_extraction.py derives the "-constrained" output-dir suffix from the flag.
+# is orthogonal and set by the single --constrained flag, passed straight to
+# llm_extraction.py, which both triggers the span-grammar machinery and routes
+# output to the "-constrained" dir:
+#   * default (unconstrained): free decoding -> data/extracted_relevancy/long-embed-xml/
+#   * --constrained: per-document substring grammar, every span guaranteed
+#     verbatim -> data/extracted_relevancy/long-embed-xml-constrained/
 TEMPLATE_FILE="templates/long-embed-xml.template"
-MODE_ARGS=(--span_text_format)
+MODE_ARGS=()
 if [ "$CONSTRAINED" -eq 1 ]; then
   echo "CONSTRAINED: per-document span-grammar decoding (verbatim spans)."
-  MODE_ARGS=(--vllm_span_grammar)
+  MODE_ARGS=(--constrained)
 else
-  echo "UNCONSTRAINED (default): free decoding, delimiter parsing only."
+  echo "UNCONSTRAINED (default): free decoding."
 fi
 
 # HuggingFace model ids to loop over. Only models that fit in the local
@@ -120,7 +120,7 @@ echo "Using CUDA_HOME=$CUDA_HOME"
 
 # The pip nvcc (13.2) is newer than FlashInfer 0.6.12's bundled CCCL headers, so
 # JIT-compiling FlashInfer's sampling kernel fails with "CUDA compiler and CUDA
-# toolkit headers are incompatible". We decode greedily (guided JSON), so the
+# toolkit headers are incompatible". We decode greedily (temperature=0), so the
 # FlashInfer sampler adds nothing -- disable it and use vLLM's native Torch
 # sampler, which needs no runtime compilation.
 export VLLM_USE_FLASHINFER_SAMPLER=0

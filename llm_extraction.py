@@ -110,13 +110,7 @@ class VLLMGenerator:
 
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
-                 psg_key='passage', span_grammar=False,
-                 span_format=False):
-
-        # The delimiter output format (<spans>/<s>...</s>) is implied by the
-        # grammar; it can also be requested alone (--span_text_format) for the
-        # unconstrained ablation that uses the same prompt without the grammar.
-        self.span_format = span_format or span_grammar
+                 psg_key='passage', constrained=False):
 
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
@@ -129,11 +123,11 @@ class VLLMGenerator:
         self.model = model_name
         self.max_gen_tokens = max_gen_tokens
         self.psg_key = psg_key
-        self.span_grammar = span_grammar
+        self.constrained = constrained
         self._n_truncated = 0
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         llm_kwargs = {}
-        if span_grammar:
+        if constrained:
             # Per-document substring grammars use llguidance's lark dialect,
             # which only the "guidance" structured-outputs backend understands.
             # Forcing it also skips the per-request xgrammar validation attempt
@@ -312,7 +306,7 @@ class VLLMGenerator:
         JSON."""
         token_prompts = [{"prompt_token_ids": self._prompt_ids(system, user)}
                          for system, user in prompts]
-        if self.span_grammar:
+        if self.constrained:
             assert constraint_texts is not None and len(constraint_texts) == len(prompts)
             per_prompt = [self._span_params(doc or "") for doc in constraint_texts]
             outputs = self.llm.generate(token_prompts, per_prompt)
@@ -903,7 +897,7 @@ def get_args():
                              "templates/long-embed-json.template -> long-embed-json-system/user). "
                              "The template defines the output FORMAT (long-embed-json vs "
                              "long-embed-xml); the decoding CONSTRAINT is orthogonal (see "
-                             "--vllm_span_grammar).")
+                             "--constrained).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
 
@@ -946,16 +940,13 @@ def get_args():
                         help="Model dtype for vLLM (e.g. auto, bfloat16, float16).")
     parser.add_argument('--max_gen_tokens', type=int, default=4096,
                         help="Max tokens to generate per sample (vLLM offline path).")
-    parser.add_argument('--vllm_span_grammar', action='store_true',
-                        help="Constrain vLLM decoding so every generated span is a verbatim "
-                             "contiguous substring of its own (possibly truncated) passage "
-                             "(llguidance substring grammar, per request; constrained decoding "
-                             "for the long-embed-xml format). Routes output to a '-constrained' dir.")
-    parser.add_argument('--span_text_format', action='store_true',
-                        help="Parse the delimiter output format (<spans>/<s>...</s>) into the "
-                             "canonical spans JSON WITHOUT the decoding constraint -- the "
-                             "unconstrained ablation for the same prompt. Implied by "
-                             "--vllm_span_grammar.")
+    parser.add_argument('--constrained', action='store_true',
+                        help="Constrained decoding (vLLM only): a per-document llguidance "
+                             "substring grammar so every generated span is a verbatim contiguous "
+                             "substring of its own (possibly truncated) passage. Routes output to "
+                             "a '-constrained' dir. Without it, decoding is free/unconstrained "
+                             "(output is parsed leniently -- JSON or the <spans>/<s> delimiter "
+                             "format are both auto-detected).")
 
     return parser.parse_args()
 
@@ -974,8 +965,7 @@ def main():
                 dtype=args.vllm_dtype,
                 max_gen_tokens=args.max_gen_tokens,
                 psg_key=args.psg_key,
-                span_grammar=args.vllm_span_grammar,
-                span_format=args.span_text_format,
+                constrained=args.constrained,
             )
         else:
             generation_api = OpenAIGenerator(
@@ -999,15 +989,14 @@ def main():
     #
     # The output directory is keyed on TWO orthogonal axes:
     #   * format     -- the template basename (long-embed-json / long-embed-xml)
-    #   * constraint -- per-document span-grammar decoding (--vllm_span_grammar)
+    #   * constraint -- per-document span-grammar decoding (--constrained)
     #                   writes to a sibling "-constrained" dir; free decoding
     #                   uses the bare format dir.
     # Span grammar only applies to the XML span format, so the dirs produced are
     # long-embed-json, long-embed-xml, and long-embed-xml-constrained -- never a
     # filename suffix. (There is deliberately no JSON-constrained mode.)
     template_name = os.path.basename(template_base_path(args.template_file))
-    constrained = args.vllm_span_grammar
-    mode_dir = f"{template_name}-constrained" if constrained else template_name
+    mode_dir = f"{template_name}-constrained" if args.constrained else template_name
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
