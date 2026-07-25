@@ -363,6 +363,31 @@ def parse_span_text_format(text):
     return [s for s in re.findall(r"<s>(.*?)</s>", text, flags=re.S) if s]
 
 
+def strip_reasoning(text):
+    """Drop a reasoning model's thinking block so the trailing answer parses.
+
+    Handles the two conventions we see: a paired ``<think>...</think>`` block,
+    and a bare closing ``</think>`` with no opening tag (e.g. Qwen). Anything
+    after the last ``</think>`` is kept. Other conventions (``<thought>``,
+    ``<|channel|>analysis...``, etc.) are intentionally not handled. Returns
+    the text unchanged when no ``</think>`` is present."""
+    if "</think>" not in text:
+        return text
+    tail = text[text.rindex("</think>") + len("</think>"):]
+    if "<think>" in text:
+        return text[:text.index("<think>")] + tail
+    return tail
+
+
+def strip_code_fence(text):
+    """Return the body of the first Markdown code fence (```json ... ``` or a
+    bare ``` ... ```) when present, else the text unchanged. Some models
+    (e.g. gemma) wrap the {"spans": [...]} JSON in a fenced block, which
+    json.loads cannot parse directly."""
+    match = re.search(r"```(?:json)?[ \t]*\n?(.*?)```", text, flags=re.S)
+    return match.group(1) if match else text
+
+
 def _common_prefix_len(a, b):
     """Length of the common character prefix of two strings; bisection with
     C-speed slice comparisons, so it is fast even on 250KB passages."""
@@ -656,13 +681,21 @@ def get_all_responses(generated_data_dir):
         if type(v) is str:
             # JSON first ({"spans": [...]}, incl. batch files written by older
             # runs); a verbatim span may itself contain "<s>", so the delimiter
-            # parse must never run on already-JSON content.
-            try:
-                object = json.loads(v)
-                if 'spans' in object:
-                    return object
-            except json.JSONDecodeError:
-                pass
+            # parse must never run on already-JSON content. Some models wrap the
+            # JSON in a <think>...</think> reasoning block (e.g. Qwen) and/or a
+            # ```json code fence (e.g. gemma), so retry with those peeled off.
+            candidates = []
+            for t in (v, strip_reasoning(v)):
+                for candidate in (t, strip_code_fence(t)):
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+            for candidate in candidates:
+                try:
+                    object = json.loads(candidate)
+                    if 'spans' in object:
+                        return object
+                except json.JSONDecodeError:
+                    pass
             # Delimiter format (<spans>/<s>...</s>), stored raw so that format
             # compliance stays analyzable for unconstrained ablation runs.
             spans = parse_span_text_format(v)
