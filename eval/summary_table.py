@@ -121,22 +121,28 @@ def build_summary(plaus_key="plausibility@0", compr_key="comprehensiveness@2048"
 
 def order_systems(systems):
     def key(s):
-        if s.startswith("long-embed-constrained/"):
+        if s.startswith("long-embed-xml-constrained/"):
             group = 0
-        elif s.startswith("long-embed-unconstrained/"):
+        elif s.startswith("long-embed-xml/"):
             group = 1
-        elif s.startswith("baseline:"):
+        elif s.startswith("long-embed-json-constrained/"):
             group = 2
-        else:
+        elif s.startswith("long-embed-json/"):
             group = 3
+        elif s.startswith("baseline:"):
+            group = 4
+        else:
+            group = 5
         return (group, s)
     return sorted(systems, key=key)
 
 
 def short_name(system):
     return (system
-            .replace("long-embed-constrained/", "con ")
-            .replace("long-embed-unconstrained/", "unc ")
+            .replace("long-embed-xml-constrained/", "xml-con ")
+            .replace("long-embed-xml/", "xml-unc ")
+            .replace("long-embed-json-constrained/", "json-con ")
+            .replace("long-embed-json/", "json-unc ")
             .replace("google~", "").replace("mistralai~", "")
             .replace("-Instruct-2512", ""))
 
