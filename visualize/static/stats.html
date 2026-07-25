@@ -39,7 +39,7 @@
 </head>
 <body>
 <header>
-  <a class="home" href="/" title="dashboard">⌂</a>
+  <a class="home" href="." title="dashboard">⌂</a>
   <h1>FGR-DATA-MISMATCH-STATS — span match rates per model</h1>
 </header>
 <main>
@@ -67,7 +67,7 @@ async function main() {
   const content = document.getElementById("content");
   let files;
   try {
-    files = (await (await fetch("/api/files")).json()).files;
+    files = (await (await fetch("api/files")).json()).files;
   } catch (e) {
     content.innerHTML = `<div class="err">failed to load file list: ${esc(e.message)}</div>`;
     return;
@@ -88,7 +88,7 @@ async function main() {
   files.forEach(async (f, i) => {
     const sec = content.children[i];
     try {
-      const data = await (await fetch("/api/stats?" + new URLSearchParams({ file: f.name }))).json();
+      const data = await (await fetch("api/stats?" + new URLSearchParams({ file: f.name }))).json();
       if (data.error) throw new Error(data.error);
       sec.querySelector(".loading").outerHTML = renderTable(data.groups);
     } catch (e) {

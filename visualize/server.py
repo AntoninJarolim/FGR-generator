@@ -5,7 +5,12 @@ Serves ``visualize/static/index.html`` plus a small JSON API over the
 ``*.jsonl`` files under ``--data-dir`` (default ``data/extracted_relevancy``),
 one self-contained record per line.
 
-Pages: ``/`` dashboard, ``/viz`` data viewer, ``/stats`` span mismatch stats.
+Pages: ``/`` dashboard, ``/viz`` data viewer, ``/stats`` span mismatch stats,
+``/summary`` span-extraction performance.
+
+The run directories under ``--data-dir`` are ``long-embed-{xml,json}`` and
+their ``-constrained`` variants (plus retired ``-superseded`` /
+``-json-constrained`` runs, dropped by the default ``--exclude``).
 
 Files are indexed lazily on first access (line offsets + light per-record
 summaries) so GB-scale files never get shipped to the browser; records stream
@@ -20,6 +25,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -185,9 +191,9 @@ class JsonlIndex:
 class Registry:
     """Discovers output files under the data dir and caches their indexes."""
 
-    def __init__(self, data_dir, include=""):
+    def __init__(self, data_dir, exclude=()):
         self.data_dir = os.path.abspath(data_dir)
-        self.include = include
+        self.exclude = [e for e in exclude if e]
         self.indexes = {}
         self.lock = threading.Lock()
 
@@ -198,7 +204,7 @@ class Registry:
                 if fn.endswith(".jsonl"):
                     full = os.path.join(root, fn)
                     rel = os.path.relpath(full, self.data_dir)
-                    if self.include and self.include not in rel:
+                    if any(excl in rel for excl in self.exclude):
                         continue
                     found.append({
                         "name": rel,
@@ -312,6 +318,7 @@ class Handler(BaseHTTPRequestHandler):
         "/": "home.html",          # dashboard
         "/viz": "index.html",      # data viewer
         "/stats": "stats.html",    # span mismatch statistics
+        "/summary": "summary.html",  # span-extraction performance tables
     }
 
     def do_GET(self):
@@ -363,6 +370,19 @@ class Handler(BaseHTTPRequestHandler):
         index = REGISTRY.get(params["file"])
         self._json({"file": params["file"], "groups": index.ensure_stats()})
 
+    def route_api_summary(self, params):
+        # Span-extraction performance tables, built live from the eval JSON
+        # artifacts (data/eval/*.json) by eval/summary_table.build_summary —
+        # the same source the CLI table and the old markdown export used.
+        sys.path.insert(0, os.path.join(REPO_ROOT, "eval"))
+        from summary_table import build_summary
+        kwargs = {}
+        if params.get("plaus_key"):
+            kwargs["plaus_key"] = params["plaus_key"]
+        if params.get("compr_key"):
+            kwargs["compr_key"] = params["compr_key"]
+        self._json(build_summary(**kwargs))
+
     def route_api_gold(self, params):
         rec = load_gold().get((params.get("subset"), params.get("qid")))
         if rec is None or rec.get("join") == "miss":
@@ -390,17 +410,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
                         help="Directory scanned (recursively) for *.jsonl output files.")
-    parser.add_argument("--include", default="long-embed",
-                        help="Only list files whose path (relative to --data-dir) contains this "
-                             "substring; matches e.g. long-embed-json, long-embed-xml, "
-                             "long-embed-xml-constrained. Pass '' to list everything.")
+    parser.add_argument("--exclude", default="superseded,json-constrained",
+                        help="Comma-separated substrings; skip any file whose path (relative to "
+                             "--data-dir) contains one. Defaults drop the superseded and "
+                             "json-constrained runs. Pass '' to list everything.")
     parser.add_argument("--gold", default=os.path.join(REPO_ROOT, "data/eval/gold_answers.jsonl"),
                         help="Gold QA answers (from eval/fetch_gold_answers.py), joined by (subset, qid).")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
     args = parser.parse_args()
 
-    REGISTRY = Registry(args.data_dir, include=args.include)
+    REGISTRY = Registry(args.data_dir, exclude=args.exclude.split(","))
     GOLD_PATH = os.path.abspath(args.gold)
 
     # Pre-warm every file's index in the background so first interactions are
