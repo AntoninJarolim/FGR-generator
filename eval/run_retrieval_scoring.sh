@@ -5,14 +5,18 @@
 #
 #     bash eval/run_retrieval_scoring.sh
 #
-# Add a new model later by appending its extraction file to GPU0/GPU1 below (or
-# just:  $PY eval/retrieval_score.py --stage score --system <file> ) and then:
-#     $PY eval/retrieval_score.py --stage aggregate
+# Add a new model later by appending its extraction file to GPU0/GPU1 below, or
+# score it ad hoc:
+#     source eval/eval_env.sh
+#     $PYTHON eval/retrieval_score.py --stage score --system <file>
+#     $PYTHON eval/retrieval_score.py --stage aggregate
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PY=/mnt/data/ijarolim/conda/envs/modernCoLBERT-benchmark/bin/python
-export HF_HOME=/mnt/data/ijarolim/.hfcache
+# Activates the pylate env and sets $PYTHON (see eval/eval_env.sh); no absolute
+# paths here -- machine-local bits like HF_HOME go in the gitignored .env_eval.
+source "$(dirname "$0")/eval_env.sh"
+PY="$PYTHON"
 CON=data/extracted_relevancy/long-embed-xml-constrained
 UNC=data/extracted_relevancy/long-embed-xml
 

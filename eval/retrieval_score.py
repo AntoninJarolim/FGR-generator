@@ -30,13 +30,14 @@ budget-matched trivial baselines synthesized on the fly:
 
 (budgets per sample come from eval/build_baselines.py -> data/eval/span_budgets.json).
 
-Run in the pylate env (NOT fgr-generator):
+Run in the pylate env (NOT fgr-generator); eval/eval_env.sh activates it and
+sets $PYTHON, so no path is hardcoded:
 
-    PY=/mnt/data/ijarolim/conda/envs/modernCoLBERT-benchmark/bin/python
-    $PY eval/retrieval_score.py --stage corpus
-    $PY eval/retrieval_score.py --stage score --system data/extracted_relevancy/long-embed-xml-constrained/google~gemma-4-12B-it_from0-to12612.jsonl
-    $PY eval/retrieval_score.py --stage score --system baseline:random
-    $PY eval/retrieval_score.py --stage aggregate
+    source eval/eval_env.sh
+    $PYTHON eval/retrieval_score.py --stage corpus
+    $PYTHON eval/retrieval_score.py --stage score --system data/extracted_relevancy/long-embed-xml-constrained/google~gemma-4-12B-it_from0-to12612.jsonl
+    $PYTHON eval/retrieval_score.py --stage score --system baseline:random
+    $PYTHON eval/retrieval_score.py --stage aggregate
 
 Every stage is resumable; interrupted "score" runs continue where they stopped.
 """

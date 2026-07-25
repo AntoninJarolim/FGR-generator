@@ -3,6 +3,7 @@ data
 .idea/
 .env
 .env_einfra
+.env_eval
 notebooks/.ipynb_checkpoints
 examples/*
 

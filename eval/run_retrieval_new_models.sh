@@ -6,8 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PY=/mnt/data/ijarolim/conda/envs/modernCoLBERT-benchmark/bin/python
-export HF_HOME=/mnt/data/ijarolim/.hfcache
+# Activates the pylate env and sets $PYTHON (see eval/eval_env.sh); no absolute
+# paths here -- machine-local bits like HF_HOME go in the gitignored .env_eval.
+source "$(dirname "$0")/eval_env.sh"
+PY="$PYTHON"
 LE=data/extracted_relevancy/long-embed-json-constrained
 NQA_FRAC=0.2
 
