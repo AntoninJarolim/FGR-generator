@@ -1,8 +1,9 @@
 """LongEmbed (dwzhu/LongEmbed) input adapter.
 
 The generation pipeline expects flat records that carry BOTH a query and its
-relevant passage on the same row (the ``long-embed`` template renders
-``{{query}}`` and ``{{passage}}``). LongEmbed does not ship that shape: every
+relevant passage on the same row (the ``long-embed-json`` / ``long-embed-xml``
+templates render ``{{query}}`` and ``{{passage}}``). LongEmbed does not ship
+that shape: every
 subset is split into three parts that all share the columns ``doc_id`` /
 ``text`` / ``qid`` --
 

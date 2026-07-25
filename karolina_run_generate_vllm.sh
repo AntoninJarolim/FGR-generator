@@ -69,13 +69,19 @@ command -v zsh >/dev/null 2>&1 && RUNNER=zsh
 # both (default), "1" constrained only, "0" unconstrained only. Splitting the
 # two modes into separate concurrent jobs (each its own 4-GPU allocation) halves
 # wall-clock at identical per-GPU billing.
-for MODE in ${FGR_MODES:-1 0}; do   # 1 = constrained (guided JSON), 0 = unconstrained
-  export GUIDED_JSON=$MODE
+#
+# The mode maps to run_generate_vllm.sh's --constrained flag: constrained adds
+# span-grammar decoding, unconstrained is the bare default. Both use the same
+# long-embed-xml template; outputs land in long-embed-xml{-constrained} dirs.
+for MODE in ${FGR_MODES:-1 0}; do   # 1 = constrained (span grammar), 0 = unconstrained
+  MODE_FLAG=()
+  [ "$MODE" -eq 1 ] && MODE_FLAG=(--constrained)
   echo "==================================================================="
-  echo "=== Decoding mode GUIDED_JSON=$MODE  (TP=$FGR_TP) ==="
+  echo "=== Decoding mode $([ "$MODE" -eq 1 ] && echo CONSTRAINED || echo UNCONSTRAINED)  (TP=$FGR_TP) ==="
   echo "==================================================================="
   "$RUNNER" ./run_generate_vllm.sh \
       --vllm_tensor_parallel_size "$FGR_TP" \
+      "${MODE_FLAG[@]}" \
       "$@"
 done
 
