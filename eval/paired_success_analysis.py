@@ -167,7 +167,7 @@ def main():
         modes = by_model[model]
         # Pair a model's constrained arm with its matching unconstrained arm of
         # the same output format (XML span-grammar preferred, else JSON-guided).
-        con = modes.get("long-embed-xml-constrained") or modes.get("long-embed-json-constrained")
+        con = modes.get("long-embed-xml-constrained")
         unc = modes.get("long-embed-xml") or modes.get("long-embed-json")
         if not con or not unc:
             print(f"skip {model}: need constrained+unconstrained, have {list(modes)}", file=sys.stderr)

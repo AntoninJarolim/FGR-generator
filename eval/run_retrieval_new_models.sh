@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Retrieval plausibility/comprehensiveness for the new Karolina-cluster models
-# (gemma-4-31B, gemma-4-26B-A4B, Qwen3.6-27B), constrained arm, both GPUs.
+# Retrieval plausibility/comprehensiveness for the large Karolina-cluster models
+# (Qwen3.6-27B, gemma-4-31B), span-grammar constrained arm, one model per GPU.
 # Same protocol as eval/run_retrieval_scoring.sh; resumable. From repo root:
 #     bash eval/run_retrieval_new_models.sh
+#
+# These previously read long-embed-json-constrained/, the guided-JSON arm that
+# constrained the schema but not verbatimness; that mode and its data are gone,
+# so they now read the XML span-grammar re-runs, which ARE comparable to the
+# small models' constrained arm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,15 +15,14 @@ cd "$(dirname "$0")/.."
 # paths here -- machine-local bits like HF_HOME go in the gitignored .env_eval.
 source "$(dirname "$0")/eval_env.sh"
 PY="$PYTHON"
-LE=data/extracted_relevancy/long-embed-json-constrained
+LE=data/extracted_relevancy/long-embed-xml-constrained
 NQA_FRAC=0.2
 
 GPU0_SYSTEMS=(
-  "$LE/google~gemma-4-31B-it_from0-to12612.jsonl"
-  "$LE/google~gemma-4-26B-A4B-it_from0-to12612.jsonl"
+  "$LE/Qwen~Qwen3.6-27B_from0-to12612.jsonl"
 )
 GPU1_SYSTEMS=(
-  "$LE/Qwen~Qwen3.6-27B_from0-to12612.jsonl"
+  "$LE/google~gemma-4-31B-it_from0-to12612.jsonl"
 )
 
 run_queue () {

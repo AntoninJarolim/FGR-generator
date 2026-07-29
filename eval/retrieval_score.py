@@ -67,8 +67,7 @@ DOCUMENT_LENGTH = 32768   # pylate-fgr benchmarks.py: model card's LongEmbed set
 QUERY_LENGTH = 32
 SUBSETS = ["narrativeqa", "qmsum", "summ_screen_fd", "2wikimqa"]
 BASELINES = ("baseline:random", "baseline:lead_k", "baseline:lexical")
-MODES = ("long-embed-json", "long-embed-json-constrained",
-         "long-embed-xml", "long-embed-xml-constrained")
+MODES = ("long-embed-json", "long-embed-xml", "long-embed-xml-constrained")
 
 # Chars ~ 4 x tokens; if a modified doc is byte-identical to the original within
 # this prefix, the embedder (32768 tokens) cannot see the change -> skip encode.
@@ -296,8 +295,8 @@ class SubsetCache:
 def system_name(system):
     """Model id and mode ("<mode>/<model>") from an extraction path, or the
     baseline token unchanged. The mode is the parent directory name -- one of
-    the four canonical dirs (long-embed-json, long-embed-json-constrained,
-    long-embed-xml, long-embed-xml-constrained)."""
+    the three canonical dirs (long-embed-json, long-embed-xml,
+    long-embed-xml-constrained)."""
     if system.startswith("baseline:"):
         return system
     name = os.path.basename(system)

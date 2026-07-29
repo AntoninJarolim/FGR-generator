@@ -51,8 +51,7 @@ AC_VERSION = 1
 
 QA_SUBSETS = ("narrativeqa", "2wikimqa")
 SHORT_ANSWER_CHARS = 3
-MODES = ("long-embed-json", "long-embed-json-constrained",
-         "long-embed-xml", "long-embed-xml-constrained")
+MODES = ("long-embed-json", "long-embed-xml", "long-embed-xml-constrained")
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(EVAL_DIR, ".cache")
@@ -228,10 +227,11 @@ def print_table(rows):
 
 def parse_model_and_mode(path):
     """Model id and mode from an extraction path. The mode is the parent
-    directory name -- one of the four canonical dirs (long-embed-json,
-    long-embed-json-constrained, long-embed-xml, long-embed-xml-constrained);
-    the file is <model>_from<a>-to<b>.jsonl (the mode is never a filename
-    suffix)."""
+    directory name -- one of the three canonical dirs (long-embed-json,
+    long-embed-xml, long-embed-xml-constrained); the file is
+    <model>_from<a>-to<b>.jsonl (the mode is never a filename suffix).
+    There is no JSON-constrained dir: constrained decoding is span-grammar
+    only, which emits the XML format."""
     name = os.path.basename(path)
     stem = name[:-len(".jsonl")] if name.endswith(".jsonl") else name
     return stem.split("_from")[0], os.path.basename(os.path.dirname(path))

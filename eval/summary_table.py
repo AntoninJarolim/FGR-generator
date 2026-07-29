@@ -125,14 +125,12 @@ def order_systems(systems):
             group = 0
         elif s.startswith("long-embed-xml/"):
             group = 1
-        elif s.startswith("long-embed-json-constrained/"):
-            group = 2
         elif s.startswith("long-embed-json/"):
-            group = 3
+            group = 2
         elif s.startswith("baseline:"):
-            group = 4
+            group = 3
         else:
-            group = 5
+            group = 4
         return (group, s)
     return sorted(systems, key=key)
 
@@ -141,7 +139,6 @@ def short_name(system):
     return (system
             .replace("long-embed-xml-constrained/", "xml-con ")
             .replace("long-embed-xml/", "xml-unc ")
-            .replace("long-embed-json-constrained/", "json-con ")
             .replace("long-embed-json/", "json-unc ")
             .replace("google~", "").replace("mistralai~", "")
             .replace("-Instruct-2512", ""))
