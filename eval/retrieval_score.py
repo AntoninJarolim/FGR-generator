@@ -147,9 +147,22 @@ def ablate(passage, merged):
     return "".join(parts)
 
 
-def pseudo_doc(passage, merged, missing):
-    parts = [passage[start:end] for start, end in merged] + missing
-    return "\n".join(parts)
+def pseudo_doc(passage, merged):
+    """Spans-only document: ONLY text that actually occurs in the passage.
+
+    Spans that could not be located are deliberately dropped rather than
+    appended verbatim. Appending them (as this did originally) embeds text that
+    is absent from the document, so an unconstrained model that paraphrases
+    fluently scores well on spans that do not exist -- and a fully hallucinated
+    output still produced a non-empty pseudo-document. With them dropped, an
+    extraction whose every span is unlocatable yields an empty pseudo-document,
+    which scores zero: the correct penalty.
+
+    Run eval/heuristic_spans.py first for unconstrained arms, so spans that
+    differ only cosmetically (case, quotes, whitespace) or within the approximate
+    edit budget are recovered as real passage substrings instead of being lost.
+    """
+    return "\n".join(passage[start:end] for start, end in merged)
 
 
 # --------------------------- baseline span synthesis ---------------------------
@@ -342,14 +355,22 @@ def iter_pairs(source_file, subsets, narrativeqa_frac=1.0):
             yield rec
 
 
-def build_modified(rec, system, direction, context, budgets):
-    """-> (modified_text or None-if-no-op, stats dict)."""
+def build_modified(rec, system, direction, context, budgets, heuristic=None):
+    """-> (modified_text or None-if-no-op, stats dict).
+
+    ``heuristic`` maps (subset, qid, doc_id) -> heuristically located spans (see
+    eval/heuristic_spans.py). When supplied it REPLACES the raw selected_spans,
+    so both directions score the same, verbatim span set.
+    """
     passage = rec["passage"]
     if system.startswith("baseline:"):
         key = f"{rec['subset']}|{rec['qid']}|{rec['doc_id']}"
         b = budgets.get(key) or {"budget": 0, "n_spans": 1}
         spans = baseline_spans(system.split(":", 1)[1], rec["query"], passage,
                                int(b["budget"]), int(round(b["n_spans"])))
+    elif heuristic is not None:
+        spans = dedupe_spans(heuristic.get(
+            (rec["subset"], rec["qid"], rec["doc_id"]), []))
     else:
         spans = dedupe_spans(rec.get("selected_spans"))
     merged, missing = span_intervals(passage, spans, context)
@@ -358,7 +379,7 @@ def build_modified(rec, system, direction, context, budgets):
              "removed_in_window": sum(min(end, CHAR_WINDOW) - min(start, CHAR_WINDOW)
                                       for start, end in merged)}
     if direction == "plausibility":
-        text = pseudo_doc(passage, merged, missing)
+        text = pseudo_doc(passage, merged)
         return (text if text.strip() else None), stats
     if not merged:
         return None, stats
@@ -366,6 +387,38 @@ def build_modified(rec, system, direction, context, budgets):
     if modified[:CHAR_WINDOW_SAFE] == passage[:CHAR_WINDOW_SAFE]:
         return None, stats     # change invisible to the embedder window
     return modified, stats
+
+
+def load_heuristic_spans(system, mode):
+    """(subset, qid, doc_id) -> located spans, or None to use selected_spans.
+
+    ``mode``: "auto" uses the sidecar when eval/heuristic_spans.py has produced
+    one (the unconstrained arms) and the raw spans otherwise (constrained arms
+    are already verbatim, so locating them is a no-op); "never" always uses the
+    raw spans; "require" refuses to score without a sidecar, which is the safe
+    setting for an unconstrained arm -- scoring one without it embeds
+    unlocatable text in the pseudo-document.
+    """
+    if mode == "never" or system.startswith("baseline:"):
+        return None
+    from eval.heuristic_spans import sidecar_path
+    path = sidecar_path(system_name(system))
+    if not os.path.exists(path):
+        if mode == "require":
+            sys.exit(f"--heuristic-spans require: no sidecar at {path}\n"
+                     f"run: $PYTHON eval/heuristic_spans.py {system}")
+        return None
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            out[(r["subset"], r["qid"], r["doc_id"])] = r.get("heuristic_spans", [])
+    print(f"heuristic spans: {len(out)} records from {os.path.basename(path)}",
+          file=sys.stderr)
+    return out
 
 
 def stage_score(args):
@@ -378,6 +431,8 @@ def stage_score(args):
         print(f"baseline passages streamed from {source}", file=sys.stderr)
     else:
         source = args.system
+
+    heuristic = load_heuristic_spans(args.system, args.heuristic_spans)
 
     model = load_model(args.device)
     caches = {s: SubsetCache(s, args.device) for s in args.subsets}
@@ -433,7 +488,7 @@ def stage_score(args):
                         continue
                     n += 1
                     text, stats = build_modified(rec, args.system, direction,
-                                                 context, budgets)
+                                                 context, budgets, heuristic)
                     if text is None:
                         # no-op: plausibility -> empty pseudo-doc scores nothing;
                         # comprehensiveness -> unchanged doc keeps its score.
@@ -555,6 +610,12 @@ def main():
                         help="context chars each side of a span (the ladder rungs)")
     parser.add_argument("--plausibility-first-context-only", action="store_true",
                         help="run plausibility only at the first context rung")
+    parser.add_argument("--heuristic-spans", choices=["auto", "never", "require"],
+                        default="auto",
+                        help="use the eval/heuristic_spans.py sidecar (verbatim "
+                             "located spans) instead of raw selected_spans: auto "
+                             "when a sidecar exists, never, or require it "
+                             "(recommended for unconstrained arms).")
     parser.add_argument("--budgets", default=DEFAULT_BUDGETS)
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     parser.add_argument("--json-out", default=DEFAULT_JSON_OUT)

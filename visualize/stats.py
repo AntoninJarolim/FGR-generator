@@ -37,75 +37,23 @@ import time
 
 import numpy as np
 
-APPROX_RATE = 0.05
+# Run directly (``python visualize/stats.py``) sys.path[0] is visualize/, not
+# the repo root, so make the repo importable before pulling in custom_utils.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Span matching -- tiers, normalization, approximate alignment -- lives in
+# custom_utils/span_match.py so eval/heuristic_spans.py, which needs the match
+# OFFSETS and not just the tier, shares this exact implementation. One
+# implementation is what keeps the located spans and these tier rates in
+# agreement. Re-exported here because callers already import them from stats.
+from custom_utils.span_match import (  # noqa: F401  (re-exported)
+    APPROX_RATE, NORM_TABLE, approx_matches, locate_span, normalize,
+    normalize_with_map, semiglobal_min_err,
+)
 
 # Bump when classification/aggregation semantics change: cached stats sidecars
 # with a different version are recomputed instead of served.
-STATS_VERSION = 2
-
-NORM_TABLE = str.maketrans({
-    "‘": "'", "’": "'",   # curly single quotes
-    "“": '"', "”": '"',   # curly double quotes
-    "–": "-", "—": "-",   # en/em dash
-    " ": " ",                  # nbsp
-})
-_WS = re.compile(r"[ \t\n\r\f\v]+")
-
-
-def normalize(text):
-    return _WS.sub(" ", text.translate(NORM_TABLE).lower())
-
-
-def semiglobal_min_err(win, pat):
-    """Minimum edits to align ``pat`` fully inside ``win`` (window start/end
-    free). Vectorized row-wise DP; the insertion recurrence (a running min) is
-    handled with the prefix-min trick on D[j]-j."""
-    n, m = len(win), len(pat)
-    if m == 0:
-        return 0
-    if n == 0:
-        return m
-    wc = np.frombuffer(win.encode("utf-32-le"), dtype=np.uint32)
-    pc = np.frombuffer(pat.encode("utf-32-le"), dtype=np.uint32)
-    idx = np.arange(n + 1, dtype=np.int32)
-    prev = np.zeros(n + 1, dtype=np.int32)          # D[0][j] = 0 (free start)
-    for i in range(1, m + 1):
-        t = np.minimum(prev[:-1] + (wc != pc[i - 1]),   # substitute
-                       prev[1:] + 1)                    # skip pattern char
-        v = np.concatenate(([np.int32(i)], t)) - idx    # cur[0] = i
-        np.minimum.accumulate(v, out=v)                 # insertion: running min
-        prev = v + idx
-    return int(prev.min())
-
-
-def approx_matches(norm_passage, ns):
-    """True when ``ns`` aligns somewhere in ``norm_passage`` within the edit
-    budget. Anchor-and-verify (pigeonhole): with <= maxErr edits at least one
-    of maxErr+1 span pieces survives verbatim; align only around piece hits."""
-    if len(ns) < 8:
-        return False
-    max_err = max(2, round(len(ns) * APPROX_RATE))
-    pieces = max_err + 1
-    piece_len = -(-len(ns) // pieces)
-    if piece_len < 4:
-        pieces = len(ns) // 4
-        piece_len = -(-len(ns) // pieces)
-    starts = set()
-    for p in range(pieces):
-        if len(starts) >= 60:
-            break
-        off = p * piece_len
-        piece = ns[off:off + piece_len]
-        frm, hits = 0, 0
-        while piece and hits < 50:
-            pos = norm_passage.find(piece, frm)
-            if pos == -1:
-                break
-            starts.add(max(0, pos - off - max_err - 2) // 16 * 16)
-            frm, hits = pos + 1, hits + 1
-    win_len = len(ns) + 2 * (max_err + 2)
-    return any(semiglobal_min_err(norm_passage[ws:ws + win_len], ns) <= max_err
-               for ws in starts)
+STATS_VERSION = 3
 
 
 class _NormCache:
