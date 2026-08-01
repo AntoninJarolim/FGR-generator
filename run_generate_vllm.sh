@@ -12,6 +12,10 @@
 # Usage:
 #   ./run_generate_vllm.sh                  # full run, unconstrained
 #   ./run_generate_vllm.sh --constrained    # span-grammar constrained decoding
+#   ./run_generate_vllm.sh --constrained --reasoning
+#                                           # reasoning models think first, grammar
+#                                           # engages after </think>; writes to a
+#                                           # separate "-reasoning" dir
 #   ./run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
 #   ./run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
@@ -21,11 +25,13 @@ set -euo pipefail
 # forwarded to llm_extraction.py.
 DRY_RUN=0
 CONSTRAINED=0
+REASONING=0
 EXTRA_ARGS=()
 for arg in "$@"; do
   case $arg in
     --dry-run) DRY_RUN=1 ;;
     --constrained) CONSTRAINED=1 ;;
+    --reasoning) REASONING=1 ;;
     *) EXTRA_ARGS+=("$arg") ;;
   esac
 done
@@ -77,6 +83,38 @@ EXTREME_MODELS=(
     "Qwen/Qwen3-235B-A22B-Thinking-2507"
 )
 
+# model -> vLLM reasoning parser. Needed per-model because vLLM auto-detects
+# none, and a wrong name disables the span grammar. Models absent from the map
+# run without a parser -- correct for non-reasoning ones (Ministral-3).
+typeset -A REASONING_PARSERS
+REASONING_PARSERS=(
+    "Qwen/Qwen3.6-27B"                  qwen3
+    "Qwen/Qwen3-235B-A22B-Thinking-2507" qwen3
+    "google/gemma-4-12B-it"             gemma4
+    "google/gemma-4-31B-it"             gemma4
+    "google/gemma-4-E4B-it"             gemma4
+    "google/gemma-4-26B-A4B-it"         gemma4
+)
+# gemma-4 only: its template pre-closes an empty thought channel, so the parser
+# alone would leave it unable to reason.
+typeset -A NEEDS_ENABLE_THINKING
+NEEDS_ENABLE_THINKING=(
+    "google/gemma-4-12B-it"             1
+    "google/gemma-4-31B-it"             1
+    "google/gemma-4-E4B-it"             1
+    "google/gemma-4-26B-A4B-it"         1
+)
+
+# CoT/answer token split when --reasoning is on. Sized from the unconstrained
+# Qwen3.6-27B run (p90 CoT ~4K tokens, max ~8.7K); answers are ~100 tokens.
+MAX_GEN_TOKENS=8192
+THINKING_TOKEN_BUDGET=12288
+if [ "$REASONING" -eq 1 ]; then
+  MAX_GEN_TOKENS=16384
+else
+  THINKING_TOKEN_BUDGET=""
+fi
+
 # On big-GPU machines (e.g. MetaCentrum DGX via dgx_run_generate_vllm.sh) run
 # the large or extreme models instead of the local-VRAM-sized ones.
 if [ "${RUN_EXTREME_MODELS:-0}" -eq 1 ]; then
@@ -126,6 +164,21 @@ echo "Using CUDA_HOME=$CUDA_HOME"
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 for MODEL_NAME in "${MODELS[@]}"; do
+    REASONING_ARGS=()
+    if [ "$REASONING" -eq 1 ]; then
+      PARSER="${REASONING_PARSERS[$MODEL_NAME]:-}"
+      if [ -n "$PARSER" ]; then
+        REASONING_ARGS=(--reasoning_parser "$PARSER"
+                        --thinking_token_budget "$THINKING_TOKEN_BUDGET")
+        if [ -n "${NEEDS_ENABLE_THINKING[$MODEL_NAME]:-}" ]; then
+          REASONING_ARGS+=(--enable_thinking)
+        fi
+        echo "REASONING: $MODEL_NAME -> parser=$PARSER, budget=$THINKING_TOKEN_BUDGET."
+      else
+        echo "REASONING: $MODEL_NAME has no parser mapping -- running without reasoning."
+      fi
+    fi
+
     echo "Running llm_extraction.py (vLLM offline) with model: $MODEL_NAME"
     "$PYTHON" llm_extraction.py \
         --input_data_name 'dwzhu/LongEmbed' \
@@ -135,9 +188,10 @@ for MODEL_NAME in "${MODELS[@]}"; do
         --generation_client vllm \
         --batch_size 128 \
         --vllm_max_model_len 65536 \
-        --max_gen_tokens 8192 \
+        --max_gen_tokens "$MAX_GEN_TOKENS" \
         --vllm_gpu_memory_utilization 0.9 \
         "${MODE_ARGS[@]}" \
+        "${REASONING_ARGS[@]}" \
         --skip-regeneration \
         "${DRY_RUN_ARGS[@]}" \
         "${EXTRA_ARGS[@]}"

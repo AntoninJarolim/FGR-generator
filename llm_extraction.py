@@ -110,7 +110,21 @@ class VLLMGenerator:
 
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
-                 psg_key='passage', constrained=False):
+                 psg_key='passage', constrained=False, reasoning_parser=None,
+                 thinking_token_budget=None, enable_thinking=False):
+
+        # Validated here rather than at first use: loading the weights first
+        # would burn minutes only to reject the flags afterwards.
+        if thinking_token_budget is not None:
+            if not reasoning_parser:
+                raise ValueError("--thinking_token_budget needs --reasoning_parser: "
+                                 "vLLM derives the reasoning delimiters it force-emits "
+                                 "from the parser (vllm/config/reasoning.py).")
+            if thinking_token_budget >= max_gen_tokens:
+                raise ValueError(
+                    f"--thinking_token_budget ({thinking_token_budget}) must leave room "
+                    f"for the spans inside --max_gen_tokens ({max_gen_tokens}); "
+                    f"constrained outputs are small (~100 tokens) but not free.")
 
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
@@ -124,9 +138,23 @@ class VLLMGenerator:
         self.max_gen_tokens = max_gen_tokens
         self.psg_key = psg_key
         self.constrained = constrained
+        self.reasoning_parser = reasoning_parser
+        self.thinking_token_budget = thinking_token_budget
+        self.enable_thinking = enable_thinking
         self._n_truncated = 0
+        self._n_grammar_not_engaged = 0
+        self._n_with_reasoning = 0
+        self._n_generated = 0
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         llm_kwargs = {}
+        if reasoning_parser:
+            # Reason first, constrain second: one kwarg because vLLM routes it to
+            # both the grammar gating (bitmask held back until the reasoning-end
+            # token) and reasoning_config (the thinking budget below).
+            llm_kwargs['reasoning_parser'] = reasoning_parser
+            print(f"Reasoning-aware decoding: parser={reasoning_parser!r}, "
+                  f"thinking_token_budget={thinking_token_budget}, "
+                  f"enable_thinking={enable_thinking}.")
         if constrained:
             # Per-document substring grammars use llguidance's lark dialect,
             # which only the "guidance" structured-outputs backend understands.
@@ -162,6 +190,8 @@ class VLLMGenerator:
             temperature=0.0,
             max_tokens=max_gen_tokens,
         )
+        if thinking_token_budget is not None:
+            sampling_kwargs['thinking_token_budget'] = thinking_token_budget
         self.sampling_params = SamplingParams(**sampling_kwargs)
 
     def _prompt_ids(self, system_prompt, user_prompt):
@@ -175,9 +205,13 @@ class VLLMGenerator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        # gemma-4's template pre-closes an EMPTY thought channel unless this is
+        # set, so without it the model cannot reason whatever the constraint is.
+        # Templates that always think (Qwen) ignore the extra context variable.
+        template_kwargs = {"enable_thinking": True} if self.enable_thinking else {}
         try:
             ids = self.tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True
+                messages, tokenize=True, add_generation_prompt=True, **template_kwargs
             )
         except Exception:
             # Some chat templates (e.g. Gemma) reject a standalone system role;
@@ -187,7 +221,7 @@ class VLLMGenerator:
                 "content": f"{system_prompt}\n\n{user_prompt}",
             }]
             ids = self.tokenizer.apply_chat_template(
-                merged, tokenize=True, add_generation_prompt=True
+                merged, tokenize=True, add_generation_prompt=True, **template_kwargs
             )
         # Fast tokenizers return a plain id list; MistralCommonBackend returns
         # a BatchEncoding -- unwrap to the id list either way.
@@ -290,12 +324,20 @@ class VLLMGenerator:
         )
 
     def _span_params(self, doc):
-        """Per-request SamplingParams constraining decoding to spans of ``doc``."""
+        """Per-request SamplingParams constraining decoding to spans of ``doc``.
+
+        ``thinking_token_budget`` is what guarantees the grammar ever engages:
+        once it is spent vLLM force-emits the reasoning-end token, so a CoT that
+        would otherwise run to max_tokens cannot yield a sample with no spans."""
         from vllm.sampling_params import StructuredOutputsParams
+        kwargs = {}
+        if self.thinking_token_budget is not None:
+            kwargs['thinking_token_budget'] = self.thinking_token_budget
         return SamplingParams(
             temperature=0.0,
             max_tokens=self.max_gen_tokens,
             structured_outputs=StructuredOutputsParams(grammar=self._span_grammar(doc)),
+            **kwargs,
         )
 
     def generate(self, prompts, constraint_texts=None):
@@ -314,8 +356,37 @@ class VLLMGenerator:
             outputs = self.llm.generate(token_prompts, self.sampling_params)
         # Delimiter-format output is stored RAW; parse_span_text_format converts
         # it at read time (get_all_responses.decode_one), so batch files keep
-        # the verbatim model output for format-compliance analysis.
-        return [output.outputs[0].text for output in outputs]
+        # the verbatim model output (reasoning block included) for
+        # format-compliance and CoT analysis.
+        texts = [output.outputs[0].text for output in outputs]
+        self._check_grammar_engaged(texts)
+        return texts
+
+    def _check_grammar_engaged(self, texts):
+        """Abort a constrained run whose outputs did not go through the grammar.
+
+        A reasoning parser that does not match the model leaves reasoning_ended
+        False forever, so the bitmask is never filled and decoding SILENTLY
+        degrades to free -- a whole run's verbatim-substring guarantee lost with
+        nothing in the log. Raising beats warning: the run is already void."""
+        if not self.constrained:
+            return
+        self._n_generated += len(texts)
+        for text in texts:
+            answer = strip_reasoning(text)
+            if answer is not text:
+                self._n_with_reasoning += 1
+            if not answer.lstrip().startswith("<spans>"):
+                self._n_grammar_not_engaged += 1
+        if self._n_grammar_not_engaged:
+            raise RuntimeError(
+                f"{self._n_grammar_not_engaged}/{self._n_generated} constrained outputs do "
+                f"not start with '<spans>': the span grammar was not applied, so decoding "
+                f"ran unconstrained. With --reasoning_parser={self.reasoning_parser!r} the "
+                f"usual cause is a parser whose reasoning delimiters the model never emits.")
+        if self.reasoning_parser:
+            print(f"Reasoning present in {self._n_with_reasoning}/{self._n_generated} "
+                  f"constrained outputs so far.")
 
 
 def parse_span_text_format(text):
@@ -325,20 +396,29 @@ def parse_span_text_format(text):
     return [s for s in re.findall(r"<s>(.*?)</s>", text, flags=re.S) if s]
 
 
+# (open, close) pairs. Keyed on the CLOSE: the opening tag is often absent from
+# the output because the chat template already emitted it into the prompt.
+REASONING_DELIMITERS = (
+    ("<think>", "</think>"),        # Qwen, DeepSeek-R1 and friends
+    ("<|channel>", "<channel|>"),   # gemma-4 thought channel
+)
+
+
 def strip_reasoning(text):
     """Drop a reasoning model's thinking block so the trailing answer parses.
 
-    Handles the two conventions we see: a paired ``<think>...</think>`` block,
-    and a bare closing ``</think>`` with no opening tag (e.g. Qwen). Anything
-    after the last ``</think>`` is kept. Other conventions (``<thought>``,
-    ``<|channel|>analysis...``, etc.) are intentionally not handled. Returns
-    the text unchanged when no ``</think>`` is present."""
-    if "</think>" not in text:
-        return text
-    tail = text[text.rindex("</think>") + len("</think>"):]
-    if "<think>" in text:
-        return text[:text.index("<think>")] + tail
-    return tail
+    Handles a paired ``<open>...<close>`` block and a bare closing tag with no
+    opening one, for each convention in ``REASONING_DELIMITERS``. Anything after
+    the last closing tag is kept. Returns the text unchanged -- the same object,
+    which callers use to detect that nothing was stripped."""
+    for open_tag, close_tag in REASONING_DELIMITERS:
+        if close_tag not in text:
+            continue
+        tail = text[text.rindex(close_tag) + len(close_tag):]
+        if open_tag in text:
+            return text[:text.index(open_tag)] + tail
+        return tail
+    return text
 
 
 def strip_code_fence(text):
@@ -659,9 +739,12 @@ def get_all_responses(generated_data_dir):
                 except json.JSONDecodeError:
                     pass
             # Delimiter format (<spans>/<s>...</s>), stored raw so that format
-            # compliance stays analyzable for unconstrained ablation runs.
-            spans = parse_span_text_format(v)
-            if spans or v.strip().startswith("<spans>"):
+            # compliance stays analyzable for unconstrained ablation runs. Strip
+            # first, else a CoT rehearsing the format ("I should emit <s>Mark
+            # Hunter</s>") has its examples harvested as real spans.
+            answer = strip_reasoning(v)
+            spans = parse_span_text_format(answer)
+            if spans or answer.strip().startswith("<spans>"):
                 return {'spans': spans}
             nonlocal json_decode_error
             json_decode_error += 1
@@ -980,6 +1063,23 @@ def get_args():
                              "a '-constrained' dir. Without it, decoding is free/unconstrained "
                              "(output is parsed leniently -- JSON or the <spans>/<s> delimiter "
                              "format are both auto-detected).")
+    parser.add_argument('--reasoning_parser', type=str, default=None,
+                        help="vLLM reasoning parser name (e.g. 'qwen3', 'gemma4'). Lets a "
+                             "reasoning model emit its chain of thought freely and applies "
+                             "--constrained's span grammar only afterwards, instead of "
+                             "forcing '<spans>' at token 0. Must match the model's actual "
+                             "reasoning delimiters -- a mismatched parser disables the "
+                             "constraint, which aborts the run. Omit for non-reasoning models.")
+    parser.add_argument('--thinking_token_budget', type=int, default=None,
+                        help="Max tokens the chain of thought may use before vLLM "
+                             "force-emits the reasoning-end token and hands the rest of "
+                             "--max_gen_tokens to the (constrained) answer, so a runaway "
+                             "CoT cannot yield a sample with no spans. Requires "
+                             "--reasoning_parser and must be < --max_gen_tokens.")
+    parser.add_argument('--enable_thinking', action='store_true',
+                        help="Pass enable_thinking=True to the chat template. Needed for "
+                             "models whose template disables reasoning by default (gemma-4 "
+                             "pre-closes an empty thought channel); harmless elsewhere.")
 
     return parser.parse_args()
 
@@ -999,6 +1099,9 @@ def main():
                 max_gen_tokens=args.max_gen_tokens,
                 psg_key=args.psg_key,
                 constrained=args.constrained,
+                reasoning_parser=args.reasoning_parser,
+                thinking_token_budget=args.thinking_token_budget,
+                enable_thinking=args.enable_thinking,
             )
         else:
             generation_api = OpenAIGenerator(
@@ -1020,16 +1123,22 @@ def main():
 
     # Prepare out data file
     #
-    # The output directory is keyed on TWO orthogonal axes:
+    # The output directory is keyed on THREE orthogonal axes:
     #   * format     -- the template basename (long-embed-json / long-embed-xml)
     #   * constraint -- per-document span-grammar decoding (--constrained)
     #                   writes to a sibling "-constrained" dir; free decoding
     #                   uses the bare format dir.
+    #   * reasoning  -- --reasoning_parser appends "-reasoning" so the thinking
+    #                   and non-thinking arms stay comparable side by side
+    #                   instead of overwriting each other.
     # Span grammar only applies to the XML span format, so the dirs produced are
-    # long-embed-json, long-embed-xml, and long-embed-xml-constrained -- never a
-    # filename suffix. (There is deliberately no JSON-constrained mode.)
+    # long-embed-json, long-embed-xml, long-embed-xml-constrained and
+    # long-embed-xml-constrained-reasoning -- never a filename suffix. (There is
+    # deliberately no JSON-constrained mode.)
     template_name = os.path.basename(template_base_path(args.template_file))
     mode_dir = f"{template_name}-constrained" if args.constrained else template_name
+    if args.reasoning_parser:
+        mode_dir = f"{mode_dir}-reasoning"
     model_name = sanitize_model_name(args.model_name)
     batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
