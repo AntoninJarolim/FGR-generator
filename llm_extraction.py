@@ -192,7 +192,23 @@ class VLLMGenerator:
         )
         if thinking_token_budget is not None:
             sampling_kwargs['thinking_token_budget'] = thinking_token_budget
+        sampling_kwargs.update(self._reasoning_sampling_kwargs())
         self.sampling_params = SamplingParams(**sampling_kwargs)
+
+    def _reasoning_sampling_kwargs(self):
+        """Sampling kwargs the reasoning arm needs on EVERY request.
+
+        gemma-4 delimits its thought channel with the SPECIAL tokens <|channel>
+        and <channel|> (ids 100/101), which vLLM's default
+        skip_special_tokens=True erases from the detokenized text. The grammar
+        still engages -- the engine works on token ids -- but the stored output
+        loses the reasoning/answer boundary, so strip_reasoning cannot split it
+        and the answer looks like it never started with '<spans>'. Qwen is
+        unaffected (its </think> is an ordinary token), but keep both arms on the
+        same setting so their raw outputs stay comparable."""
+        if not self.reasoning_parser:
+            return {}
+        return {'skip_special_tokens': False}
 
     def _prompt_ids(self, system_prompt, user_prompt):
         """Chat-formatted prompt as TOKEN IDS, never as a re-tokenized string.
@@ -333,6 +349,7 @@ class VLLMGenerator:
         kwargs = {}
         if self.thinking_token_budget is not None:
             kwargs['thinking_token_budget'] = self.thinking_token_budget
+        kwargs.update(self._reasoning_sampling_kwargs())
         return SamplingParams(
             temperature=0.0,
             max_tokens=self.max_gen_tokens,
@@ -372,18 +389,31 @@ class VLLMGenerator:
         if not self.constrained:
             return
         self._n_generated += len(texts)
+        offender = None
         for text in texts:
             answer = strip_reasoning(text)
             if answer is not text:
                 self._n_with_reasoning += 1
             if not answer.lstrip().startswith("<spans>"):
                 self._n_grammar_not_engaged += 1
+                if offender is None:
+                    offender = text
         if self._n_grammar_not_engaged:
+            # Show the text: this raises BEFORE the batch file is written, so the
+            # output is otherwise lost and the next run is the only way to see
+            # what the model actually emitted. Head and tail, because the failure
+            # can be either a missing delimiter (visible up front) or an answer
+            # that never arrived (visible at the end).
             raise RuntimeError(
                 f"{self._n_grammar_not_engaged}/{self._n_generated} constrained outputs do "
                 f"not start with '<spans>': the span grammar was not applied, so decoding "
                 f"ran unconstrained. With --reasoning_parser={self.reasoning_parser!r} the "
-                f"usual cause is a parser whose reasoning delimiters the model never emits.")
+                f"usual cause is a parser whose reasoning delimiters the model never emits "
+                f"IN THE DETOKENIZED TEXT -- special-token delimiters (gemma-4's <|channel>) "
+                f"need skip_special_tokens=False.\n"
+                f"First offending output ({len(offender)} chars)\n"
+                f"  head: {offender[:400]!r}\n"
+                f"  tail: {offender[-400:]!r}")
         if self.reasoning_parser:
             print(f"Reasoning present in {self._n_with_reasoning}/{self._n_generated} "
                   f"constrained outputs so far.")
