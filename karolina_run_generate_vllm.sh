@@ -12,8 +12,10 @@
 # Usage:
 #   # Dry run (10 samples/model, both modes) on the 1h experimental queue:
 #   sbatch -p qgpu_exp -t 01:00:00 karolina_run_generate_vllm.sh --dry-run
-#   # Full run (both modes, all 3 large models) on the standard GPU queue:
+#   # Full run (both modes, every large model) on the standard GPU queue:
 #   sbatch karolina_run_generate_vllm.sh
+#   # One mode, one model -- the readable way to fan out over concurrent jobs:
+#   sbatch karolina_run_generate_vllm.sh --unconstrained --model Qwen/Qwen3.6-27B
 #
 # tensor_parallel_size is forced to 4 (FGR_TP): Qwen3.6-27B has 4 KV heads,
 # which are NOT divisible by 8, so the default TP=(#GPUs)=8 would crash. TP=4
@@ -65,15 +67,37 @@ FGR_TP="${FGR_TP:-4}"
 RUNNER=bash
 command -v zsh >/dev/null 2>&1 && RUNNER=zsh
 
-# FGR_MODES selects which decoding passes to run (space-separated): "1 0" for
-# both (default), "1" constrained only, "0" unconstrained only. Splitting the
-# two modes into separate concurrent jobs (each its own 4-GPU allocation) halves
-# wall-clock at identical per-GPU billing.
+# Which decoding passes to run is chosen by flags on the sbatch command line:
+#   sbatch karolina_run_generate_vllm.sh --constrained      # constrained only
+#   sbatch karolina_run_generate_vllm.sh --unconstrained    # unconstrained only
+#   sbatch karolina_run_generate_vllm.sh                    # both (default)
+# and which models by repeatable --model flags (default: the whole LARGE_MODELS
+# list), e.g. --model google/gemma-4-31B-it. Prefer these flags over the legacy
+# FGR_MODES env var: script arguments are stored in the job record and survive a
+# requeue, whereas Karolina has requeued jobs held with "user env retrieval
+# failed" and can drop the submit environment. Splitting modes or models into
+# separate concurrent jobs (each its own 4-GPU allocation) cuts wall-clock at
+# identical per-GPU billing.
 #
 # The mode maps to run_generate_vllm.sh's --constrained flag: constrained adds
 # span-grammar decoding, unconstrained is the bare default. Both use the same
 # long-embed-xml template; outputs land in long-embed-xml{-constrained} dirs.
-for MODE in ${FGR_MODES:-1 0}; do   # 1 = constrained (span grammar), 0 = unconstrained
+MODES=()
+PASSTHRU_ARGS=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --constrained)   MODES+=(1) ;;
+    --unconstrained) MODES+=(0) ;;
+    *)               PASSTHRU_ARGS+=("$1") ;;   # --model, --dry-run, llm_extraction.py args
+  esac
+  shift
+done
+if [ ${#MODES[@]} -eq 0 ]; then
+  # No mode flag: fall back to the legacy env var, defaulting to both passes.
+  MODES=(${FGR_MODES:-1 0})
+fi
+
+for MODE in "${MODES[@]}"; do   # 1 = constrained (span grammar), 0 = unconstrained
   MODE_FLAG=()
   [ "$MODE" -eq 1 ] && MODE_FLAG=(--constrained)
   echo "==================================================================="
@@ -82,7 +106,7 @@ for MODE in ${FGR_MODES:-1 0}; do   # 1 = constrained (span grammar), 0 = uncons
   "$RUNNER" ./run_generate_vllm.sh \
       --vllm_tensor_parallel_size "$FGR_TP" \
       "${MODE_FLAG[@]}" \
-      "$@"
+      "${PASSTHRU_ARGS[@]}"
 done
 
 echo "ALL DONE."

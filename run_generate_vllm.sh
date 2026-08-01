@@ -17,6 +17,8 @@
 #                                           # engages after </think>; writes to a
 #                                           # separate "-reasoning" dir
 #   ./run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
+#   ./run_generate_vllm.sh --model google/gemma-4-31B-it   # just this model, not a whole list
+#   ./run_generate_vllm.sh --model A --model B             # repeatable
 #   ./run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
@@ -26,14 +28,18 @@ set -euo pipefail
 DRY_RUN=0
 CONSTRAINED=0
 REASONING=0
+PICKED_MODELS=()
 EXTRA_ARGS=()
-for arg in "$@"; do
-  case $arg in
+while [ $# -gt 0 ]; do
+  case $1 in
     --dry-run) DRY_RUN=1 ;;
     --constrained) CONSTRAINED=1 ;;
     --reasoning) REASONING=1 ;;
-    *) EXTRA_ARGS+=("$arg") ;;
+    --model) shift; PICKED_MODELS+=("$1") ;;
+    --model=*) PICKED_MODELS+=("${1#--model=}") ;;
+    *) EXTRA_ARGS+=("$1") ;;
   esac
+  shift
 done
 
 # In dry-run mode only generate a handful of samples and overwrite prior output,
@@ -73,7 +79,6 @@ MODELS=(
 # here for a future run on bigger hardware; not looped over below.
 LARGE_MODELS=(
     "google/gemma-4-31B-it"
-    "google/gemma-4-26B-A4B-it"
     "Qwen/Qwen3.6-27B"
 )
 
@@ -117,7 +122,13 @@ fi
 
 # On big-GPU machines (e.g. MetaCentrum DGX via dgx_run_generate_vllm.sh) run
 # the large or extreme models instead of the local-VRAM-sized ones.
-if [ "${RUN_EXTREME_MODELS:-0}" -eq 1 ]; then
+if [ ${#PICKED_MODELS[@]} -gt 0 ]; then
+  # One or more --model flags: run exactly those, ignoring the lists above. This
+  # is how a Slurm job takes a single model, so the models run concurrently in
+  # separate allocations instead of sequentially in one.
+  echo "--model given: running ${#PICKED_MODELS[@]} explicitly named model(s)."
+  MODELS=("${PICKED_MODELS[@]}")
+elif [ "${RUN_EXTREME_MODELS:-0}" -eq 1 ]; then
   echo "RUN_EXTREME_MODELS=1: using the EXTREME_MODELS list."
   MODELS=("${EXTREME_MODELS[@]}")
 elif [ "${RUN_LARGE_MODELS:-0}" -eq 1 ]; then
