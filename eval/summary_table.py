@@ -136,10 +136,14 @@ def order_systems(systems):
 
 
 def short_name(system):
+    # LongEmbed is the only dataset, so the "long-embed-" run prefix is dropped
+    # from every row label; the trailing generic strip catches any variant not
+    # named explicitly above.
     return (system
             .replace("long-embed-xml-constrained/", "xml-con ")
             .replace("long-embed-xml/", "xml-unc ")
             .replace("long-embed-json/", "json-unc ")
+            .replace("long-embed-", "").replace("long-embed/", "")
             .replace("google~", "").replace("mistralai~", "")
             .replace("-Instruct-2512", ""))
 

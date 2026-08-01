@@ -35,6 +35,10 @@
   td.na { color: var(--muted); }
   .loading { color: var(--muted); padding: 10px 0; }
   .err { color: var(--bad); }
+  h2.figs-title { font-size: 16px; margin: 30px 0 2px; }
+  .figs-sub { color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
+  #figframe { width: 100%; border: 0; height: 480px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 10px; }
 </style>
 </head>
 <body>
@@ -45,6 +49,11 @@
 <main>
   <div id="note" class="note">loading…</div>
   <div id="content"><div class="loading">loading results…</div></div>
+
+  <h2 class="figs-title">Figures</h2>
+  <div class="figs-sub">plausibility (x) vs answer-bearing (y) per model and prompt format —
+     top-right is best.</div>
+  <iframe id="figframe" title="span-extraction figures" src="/api/summary_plot"></iframe>
 </main>
 
 <script>
@@ -85,6 +94,20 @@ function renderTable(table, columns) {
     </table>
   </section>`;
 }
+
+// The Bokeh document is served same-origin, so grow the iframe to fit its
+// content. BokehJS lays out asynchronously after load, so poll briefly.
+function fitFrame() {
+  const fr = document.getElementById("figframe");
+  try {
+    const h = fr.contentWindow.document.body.scrollHeight;
+    if (h > 60) fr.style.height = (h + 24) + "px";
+  } catch (e) { /* not loaded yet */ }
+}
+document.getElementById("figframe").addEventListener("load", () => {
+  let n = 0;
+  const id = setInterval(() => { fitFrame(); if (++n > 16) clearInterval(id); }, 250);
+});
 
 main();
 </script>
