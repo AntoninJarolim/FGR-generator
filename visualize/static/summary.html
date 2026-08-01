@@ -53,7 +53,9 @@
   <h2 class="figs-title">Figures</h2>
   <div class="figs-sub">plausibility (x) vs answer-bearing (y) per model and prompt format —
      top-right is best.</div>
-  <iframe id="figframe" title="span-extraction figures" src="/api/summary_plot"></iframe>
+  <!-- Mount-relative like the fetch() calls below, so it resolves under a
+       reverse-proxy subpath instead of the server root. -->
+  <iframe id="figframe" title="span-extraction figures" src="api/summary_plot"></iframe>
 </main>
 
 <script>

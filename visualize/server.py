@@ -381,8 +381,16 @@ class Handler(BaseHTTPRequestHandler):
         # Self-contained Bokeh HTML (BokehJS inlined) rendered from the same
         # build_summary() data; embedded by summary.html in an <iframe>.
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from summary_plot import render_html
-        html = render_html(build_summary(**self._summary_kwargs(params)))
+        try:
+            from summary_plot import render_html
+        except ImportError as e:
+            # Bokeh is the one viewer dependency beyond numpy; say so in the
+            # iframe rather than letting the request die with no response.
+            html = (f"<!doctype html><p style='font:14px system-ui;color:#b91c1c'>"
+                    f"figures unavailable: {e}. Install it with "
+                    f"<code>pip install bokeh</code>.</p>")
+        else:
+            html = render_html(build_summary(**self._summary_kwargs(params)))
         self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
     @staticmethod
