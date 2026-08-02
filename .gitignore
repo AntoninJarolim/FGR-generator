@@ -5,6 +5,7 @@ data
 .env
 .env_einfra
 .env_eval
+.env_judge
 notebooks/.ipynb_checkpoints
 examples/*
 
