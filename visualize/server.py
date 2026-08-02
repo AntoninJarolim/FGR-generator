@@ -35,6 +35,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
+# Span-extraction performance tables share their data source with the CLI.
+sys.path.insert(0, os.path.join(REPO_ROOT, "eval"))
+from summary_table import build_summary  # noqa: E402
+
 
 def record_key(rec):
     """Join key used to line up the same sample across model output files."""
@@ -371,17 +375,35 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"file": params["file"], "groups": index.ensure_stats()})
 
     def route_api_summary(self, params):
-        # Span-extraction performance tables, built live from the eval JSON
+        self._json(build_summary(**self._summary_kwargs(params)))
+
+    def route_api_summary_plot(self, params):
+        # Self-contained Bokeh HTML (BokehJS inlined) rendered from the same
+        # build_summary() data; embedded by summary.html in an <iframe>.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        try:
+            from summary_plot import render_html
+        except ImportError as e:
+            # Bokeh is the one viewer dependency beyond numpy; say so in the
+            # iframe rather than letting the request die with no response.
+            html = (f"<!doctype html><p style='font:14px system-ui;color:#b91c1c'>"
+                    f"figures unavailable: {e}. Install it with "
+                    f"<code>pip install bokeh</code>.</p>")
+        else:
+            html = render_html(build_summary(**self._summary_kwargs(params)))
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    @staticmethod
+    def _summary_kwargs(params):
+        # Span-extraction performance data, built live from the eval JSON
         # artifacts (data/eval/*.json) by eval/summary_table.build_summary —
         # the same source the CLI table and the old markdown export used.
-        sys.path.insert(0, os.path.join(REPO_ROOT, "eval"))
-        from summary_table import build_summary
         kwargs = {}
         if params.get("plaus_key"):
             kwargs["plaus_key"] = params["plaus_key"]
         if params.get("compr_key"):
             kwargs["compr_key"] = params["compr_key"]
-        self._json(build_summary(**kwargs))
+        return kwargs
 
     def route_api_gold(self, params):
         rec = load_gold().get((params.get("subset"), params.get("qid")))
