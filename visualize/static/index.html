@@ -147,7 +147,8 @@
   </aside>
   <main>
     <div id="placeholder">Select a record on the left. Models can be toggled in the header;<br>
-      the first enabled model drives the record list, others join by (subset, qid, doc_id).</div>
+      the first enabled model drives the record list, others join by (subset, qid, doc_id).<br>
+      Baselines add a synthesized reference column next to them.</div>
     <div id="recHeader" hidden></div>
     <div id="cols"></div>
   </main>
@@ -171,8 +172,15 @@ const api = async (path, params) => {
   return res.json();
 };
 
+// Trivial reference extractions the server synthesizes per record (see
+// /api/baseline and eval/retrieval_score.py). Held apart from S.files because
+// they have no file of their own: they can be extra columns but never the
+// primary that drives the record list.
+const BASELINE_KINDS = ["lexical"];
+
 const S = {
   files: [], selected: [],            // selected file names, [0] is primary
+  baselines: [],                      // enabled BASELINE_KINDS, rendered after the models
   items: [], total: 0, curIdx: null,  // record list state (indexes into primary file)
   fullText: false, ctx: 300,
   markCursor: -1,                     // n/p span-navigation position
@@ -183,7 +191,9 @@ const dirOf = f => f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "";
 const modelName = f => shortName(f).replace(/_from\d+-to\d+$/, "");
 // "model · technique-dir" label used for column titles when comparing files
 // of the same model across prompting techniques.
-const colLabel = f => modelName(f) + (dirOf(f) ? ` <span class="badge">${esc(dirOf(f))}</span>` : "");
+const colLabel = f => f.startsWith("baseline:")
+  ? `${esc(f.split(":")[1])} <span class="badge">baseline</span>`
+  : modelName(f) + (dirOf(f) ? ` <span class="badge">${esc(dirOf(f))}</span>` : "");
 
 // ---------- model selection ----------
 async function loadFiles() {
@@ -232,6 +242,32 @@ function renderModels() {
     }
     $("models").appendChild(g);
   }
+  renderBaselineChips();
+}
+
+// Baselines are columns only, so toggling one just re-renders the open record.
+function renderBaselineChips() {
+  const g = document.createElement("span");
+  g.className = "model-group";
+  const lbl = document.createElement("span");
+  lbl.className = "group-label";
+  lbl.textContent = "baselines";
+  g.appendChild(lbl);
+  for (const kind of BASELINE_KINDS) {
+    const div = document.createElement("span");
+    div.className = "model-chip" + (S.baselines.includes(kind) ? " on" : "");
+    div.innerHTML = `${esc(kind)} <small>synthesized</small>`;
+    div.title = `budget-matched ${kind} baseline, computed per record by ` +
+                `eval/retrieval_score.py — the same spans the scorer sees`;
+    div.onclick = () => {
+      const i = S.baselines.indexOf(kind);
+      if (i >= 0) S.baselines.splice(i, 1); else S.baselines.push(kind);
+      renderModels();
+      if (S.curIdx != null) openRecord(S.curIdx);
+    };
+    g.appendChild(div);
+  }
+  $("models").appendChild(g);
 }
 
 // ---------- record list ----------
@@ -437,12 +473,12 @@ function flashMark(m) {
   m.classList.add("flash");
   setTimeout(() => m.classList.remove("flash"), 1200);
 }
-function renderColumn(name, rec) {
+function renderColumn(name, rec, extraStats = [], missingMsg = "record not found in this file") {
   const col = document.createElement("div");
   col.className = "col";
   if (!rec) {
     col.innerHTML = `<div class="colTop"><div class="colHead"><div class="colTitle">${colLabel(name)}</div></div></div>
-                     <div class="missing">record not found in this file</div>`;
+                     <div class="missing">${esc(missingMsg)}</div>`;
     return col;
   }
   const passage = rec.passage || "";
@@ -462,6 +498,7 @@ function renderColumn(name, rec) {
   }
   if (rec.prompt_tokens != null) stats.push(`<span class="badge">prompt ${fmt(rec.prompt_tokens)} tok</span>`);
   stats.push(`<span class="badge">${fmt(passage.length)} chars</span>`);
+  stats.push(...extraStats);
 
   const chips = spans.map((s, i) => {
     const st = status[i];
@@ -497,6 +534,18 @@ function renderColumn(name, rec) {
   return col;
 }
 
+// A baseline column reuses the primary record's passage -- /api/baseline sends
+// back only the synthesized spans, never a second copy of the document.
+function baselineColumn(b, rec) {
+  const name = "baseline:" + b.kind;
+  if (b.spans == null)
+    return renderColumn(name, null, [], b.error || "no record to derive a baseline from");
+  const budget = b.matched
+    ? `<span class="badge" title="mean total span chars over the systems that extracted anything here (eval/build_baselines.py); the baseline selects about this much text">budget ${fmt(b.budget)} chars</span>`
+    : `<span class="badge miss" title="this sample is missing from data/eval/span_budgets.json, so the baseline cannot be size-matched — run eval/build_baselines.py">no budget</span>`;
+  return renderColumn(name, { passage: rec.passage, selected_spans: b.spans }, [budget]);
+}
+
 // Gold QA answers (joined by subset+qid, see eval/fetch_gold_answers.py).
 // Only rendered when a gold answer was actually joined for this query;
 // subsets without gold (or unjoined misses) show nothing.
@@ -526,8 +575,15 @@ async function openRecord(idx) {
   const key = [rec.subset, rec.qid, rec.doc_id].join("|");
   const goldP = api("/api/gold", { subset: rec.subset, qid: rec.qid })
     .catch(() => ({ found: false, answers: [] }));
-  const others = await Promise.all(S.selected.slice(1).map(f =>
+  const othersP = Promise.all(S.selected.slice(1).map(f =>
     api("/api/recordByKey", { file: f, key }).catch(() => ({ record: null }))));
+  // Baselines are derived from the primary file's own record, so they are
+  // requested against S.selected[0] and land beside its column.
+  const baselinesP = Promise.all(S.baselines.map(kind =>
+    api("/api/baseline", { kind, file: S.selected[0], key })
+      .catch(e => ({ kind, spans: null, error: e.message }))));
+  const others = await othersP;
+  const baselines = await baselinesP;
   const gold = await goldP;
   if (seq !== openSeq) return;
 
@@ -541,9 +597,10 @@ async function openRecord(idx) {
 
   const cols = $("cols");
   cols.innerHTML = "";
-  cols.style.setProperty("--ncols", S.selected.length);
+  cols.style.setProperty("--ncols", S.selected.length + S.baselines.length);
   cols.appendChild(renderColumn(S.selected[0], rec));
   others.forEach((o, i) => cols.appendChild(renderColumn(S.selected[i + 1], o.record)));
+  baselines.forEach(b => cols.appendChild(baselineColumn(b, rec)));
 
   // Jump straight to the first highlighted span of the newly opened record.
   cols.scrollTop = 0;

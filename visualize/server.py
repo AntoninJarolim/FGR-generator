@@ -18,6 +18,10 @@ one at a time. A file whose mtime/size changed (e.g. a run finished and
 rewrote it) is re-indexed automatically on the next request. Indexes and
 match-rate statistics are cached under ``visualize/.cache/``.
 
+Alongside the model columns the viewer can show the budget-matched trivial
+baselines from eval/retrieval_score.py (currently the lexical one), synthesized
+per record so the extractions can be eyeballed against them.
+
 Stdlib only, except the stats computation which uses numpy (see stats.py).
 """
 import argparse
@@ -238,10 +242,13 @@ class Registry:
         return JsonlIndex(full, os.path.join(CACHE_DIR, cache_name))
 
 
-REGISTRY = None    # set in main()
-GOLD_PATH = None   # set in main(): path to data/eval/gold_answers.jsonl
+REGISTRY = None      # set in main()
+GOLD_PATH = None     # set in main(): path to data/eval/gold_answers.jsonl
 GOLD_ANSWERS = None
 GOLD_LOCK = threading.Lock()
+BUDGETS_PATH = None  # set in main(): path to data/eval/span_budgets.json
+BUDGETS = None
+BUDGETS_LOCK = threading.Lock()
 
 
 def load_gold():
@@ -268,6 +275,32 @@ def load_gold():
             print(f"[gold] no gold-answers file at {GOLD_PATH}")
         GOLD_ANSWERS = gold
         return GOLD_ANSWERS
+
+
+def load_budgets():
+    """Lazily load span_budgets.json: {"<subset>|<qid>|<doc_id>": {budget, n_spans}}.
+
+    Produced by eval/build_baselines.py; it is what keeps a baseline's span
+    selection the same *size* as the LLM extractions for that sample, so the
+    comparison is not just about how much text got removed.
+    """
+    global BUDGETS
+    with BUDGETS_LOCK:
+        if BUDGETS is not None:
+            return BUDGETS
+        budgets = {}
+        if BUDGETS_PATH and os.path.isfile(BUDGETS_PATH):
+            try:
+                with open(BUDGETS_PATH, encoding="utf-8") as f:
+                    budgets = json.load(f)
+                print(f"[budgets] loaded {len(budgets)} span budgets from {BUDGETS_PATH}")
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"[budgets] could not read {BUDGETS_PATH}: {e}")
+        else:
+            print(f"[budgets] no span-budgets file at {BUDGETS_PATH} "
+                  f"(run eval/build_baselines.py)")
+        BUDGETS = budgets
+        return BUDGETS
 
 
 FLAG_TESTS = {
@@ -418,6 +451,39 @@ class Handler(BaseHTTPRequestHandler):
                 "n_gold_docs": rec.get("n_gold_docs"),
             })
 
+    def route_api_baseline(self, params):
+        """Trivial-baseline spans for one record, as an extra viewer column.
+
+        Synthesized by eval/retrieval_score.baseline_spans -- the very function
+        the scorer uses -- so what the viewer highlights is what was scored.
+        ``file`` is the primary column's file, read only for this record's
+        query/passage; just the spans travel back, since passages run to
+        250K chars and the browser already holds the primary one.
+        """
+        from retrieval_score import BASELINES, baseline_spans
+        kind = params.get("kind") or "lexical"
+        if f"baseline:{kind}" not in BASELINES:
+            raise ValueError(f"unknown baseline {kind!r}; have "
+                             f"{', '.join(b.split(':', 1)[1] for b in BASELINES)}")
+        index = REGISTRY.get(params["file"])
+        key = params.get("key", "")
+        idx = index.key_to_idx.get(key)
+        if idx is None:
+            self._json({"kind": kind, "spans": None})
+            return
+        rec = index.read_record(idx)
+        budget = load_budgets().get(key)
+        b = budget or {"budget": 0, "n_spans": 1}
+        self._json({
+            "kind": kind,
+            "spans": baseline_spans(kind, rec.get("query") or "", rec.get("passage") or "",
+                                    int(b["budget"]), int(round(b["n_spans"]))),
+            "budget": int(b["budget"]),
+            # False => this sample has no entry at all (baselines cannot be
+            # budget-matched for it), as opposed to a matched budget of 0.
+            "matched": budget is not None,
+        })
+
     def route_api_recordByKey(self, params):
         index = REGISTRY.get(params["file"])
         idx = index.key_to_idx.get(params.get("key", ""))
@@ -428,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global REGISTRY, GOLD_PATH
+    global REGISTRY, GOLD_PATH, BUDGETS_PATH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
                         help="Directory scanned (recursively) for *.jsonl output files.")
@@ -438,12 +504,16 @@ def main():
                              "json-constrained runs. Pass '' to list everything.")
     parser.add_argument("--gold", default=os.path.join(REPO_ROOT, "data/eval/gold_answers.jsonl"),
                         help="Gold QA answers (from eval/fetch_gold_answers.py), joined by (subset, qid).")
+    parser.add_argument("--budgets", default=os.path.join(REPO_ROOT, "data/eval/span_budgets.json"),
+                        help="Per-sample span budgets (from eval/build_baselines.py) that size "
+                             "the baseline columns to match the extractions.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
     args = parser.parse_args()
 
     REGISTRY = Registry(args.data_dir, exclude=args.exclude.split(","))
     GOLD_PATH = os.path.abspath(args.gold)
+    BUDGETS_PATH = os.path.abspath(args.budgets)
 
     # Pre-warm every file's index in the background so first interactions are
     # instant. With a valid sidecar cache each file loads in <1 s; otherwise it
