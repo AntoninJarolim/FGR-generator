@@ -81,13 +81,47 @@ def gather(plaus_key, compr_key):
     return cells
 
 
+JUDGE_PATH = os.path.join(REPO_ROOT, "data/eval/judge_preference.json")
+
+
+def judge_detail():
+    """The judge artifact, for the viewer's dedicated panel.
+
+    The `judge` column in the per-subset tables is a POOLED figure repeated in
+    every row group -- Bradley-Terry is fitted on all comparisons at once,
+    because a per-subset fit at ~80 items per pair is too noisy to publish. The
+    panel below carries the real numbers with their intervals.
+    """
+    d = load_json(JUDGE_PATH)
+    if not d:
+        return None
+    return {
+        "judge_model": d.get("judge_model"),
+        "n_judged": d.get("n_judged"), "n_resolved": d.get("n_resolved"),
+        "systems": d.get("systems", []),
+        "system_ids": d.get("system_ids", {}),
+        "matrix": d.get("matrix", {}),
+        "runs": d.get("runs", {}),
+        "intransitive_triads": d.get("intransitive_triads", []),
+        "tie_rate_judge": d.get("tie_rate_judge"),
+        "auto_ties": d.get("auto_ties"), "skipped": d.get("skipped_both_empty"),
+        "both_bad_rate": d.get("both_bad_rate"),
+        "flip_rate": d.get("flip_rate"), "flip_n": d.get("flip_n"),
+        "self_consistency": d.get("self_consistency"),
+        "agreement": d.get("agreement", {}),
+        "ci_method": d.get("ci_method", {}),
+    }
+
+
 def note_text(plaus_key, compr_key):
     return (f"gold-ans = answer-bearing % (gold answers exist for narrativeqa/2wikimqa only). "
             f"judge = pairwise BT win rate % (— until the judge runs). "
             f"plaus = NDCG@10 % of spans-only pseudo-doc ({plaus_key}). "
             f"compr = mean relative score drop % after span removal ({compr_key}); "
             f"higher is better in every column; compare against the baseline rows, "
-            f"not against zero.")
+            f"not against zero. judge is a POOLED Bradley-Terry share, so the "
+            f"same value appears in every subset table -- see the judged-preference "
+            f"panel for the per-system intervals and the win matrix.")
 
 
 def build_summary(plaus_key="plausibility@0", compr_key="comprehensiveness@2048"):
@@ -116,6 +150,7 @@ def build_summary(plaus_key="plausibility@0", compr_key="comprehensiveness@2048"
         "plaus_key": plaus_key,
         "compr_key": compr_key,
         "note": note_text(plaus_key, compr_key),
+        "judge": judge_detail(),
     }
 
 
