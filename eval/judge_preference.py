@@ -452,15 +452,64 @@ def fit_bt(wins, labels, iters=2000, tol=1e-10):
 
 def stage_aggregate(args):
     systems = [s["label"] for s in json.load(open(args.systems))]
-    verdicts, resolved = [], []
+    raw, resolved = [], []
     for fn in sorted(os.listdir(args.work)):
         p = os.path.join(args.work, fn)
         if fn.endswith(".verdicts.jsonl"):
-            verdicts += [json.loads(l) for l in open(p, encoding="utf-8")
-                         if l.strip() and "error" not in json.loads(l)]
+            raw += [json.loads(l) for l in open(p, encoding="utf-8")
+                    if l.strip() and "error" not in json.loads(l)]
         elif fn.endswith(".resolved.jsonl"):
             resolved += [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
-    print(f"{len(verdicts)} judged, {len(resolved)} resolved without a call")
+
+    # Runs overlap: a pilot slice and the main run can contain the same
+    # (pair, item, order), and re-scoring the same comparison twice would
+    # double-count it. Dedupe within each judge -- never across judges, whose
+    # verdicts are separate measurements and are compared, not pooled.
+    def vkey(r):
+        return (r.get("judge", MODEL), tuple(r["pair"]), tuple(r["item"]),
+                r.get("swapped", False))
+    seen, verdicts, repeats, agree = {}, [], 0, 0
+    for r in raw:
+        k = vkey(r)
+        if k in seen:
+            repeats += 1
+            agree += (seen[k]["overall_winner"] == r["overall_winner"])
+            continue
+        seen[k] = r
+        verdicts.append(r)
+    by_judge = defaultdict(list)
+    for v in verdicts:
+        by_judge[v.get("judge", MODEL)].append(v)
+    print(f"{len(raw)} verdict records -> {len(verdicts)} unique "
+          f"({repeats} duplicate re-scores dropped)")
+    if repeats:
+        print(f"self-consistency on re-scored comparisons: "
+              f"{agree}/{repeats} = {100*agree/repeats:.1f}% identical verdict")
+    for j, vs in by_judge.items():
+        print(f"  judge {j}: {len(vs)} comparisons")
+    if len(by_judge) > 1:
+        print("  (multiple judges present: the matrix below is the primary judge; "
+              "cross-judge agreement reported at the end)")
+    # Scope to the canonical item set. Earlier runs (a pilot sized against a
+    # larger item list) contribute comparisons and resolved records for items the
+    # main run never judged; mixing them makes per-pair coverage uneven and
+    # inflates the tie counts with auto-ties for unjudged items.
+    canon = {tuple(k) for k in json.load(open(args.items))}
+    n_before = len(verdicts), len(resolved)
+    verdicts = [v for v in verdicts if tuple(v["item"]) in canon]
+    resolved = [r for r in resolved if tuple(r["item"]) in canon]
+    dropped = (n_before[0] - len(verdicts), n_before[1] - len(resolved))
+    if any(dropped):
+        print(f"scoped to {len(canon)} canonical items: dropped {dropped[0]} "
+              f"out-of-set verdicts and {dropped[1]} out-of-set resolved records")
+
+    primary = MODEL if MODEL in by_judge else next(iter(by_judge))
+    by_judge = defaultdict(list)
+    for v in verdicts:
+        by_judge[v.get("judge", MODEL)].append(v)
+    verdicts = by_judge[primary]
+    print(f"{len(verdicts)} judged by {primary}, "
+          f"{len(resolved)} resolved without a call")
     if not verdicts:
         sys.exit("no verdicts yet")
 
@@ -567,25 +616,67 @@ def stage_aggregate(args):
     for s in sorted(systems, key=lambda s: -bt[s]):
         print(f"  {s:22s} theta={bt[s]:7.3f}  normalised={bt[s]/z*100:5.1f}%")
 
+    # ---- cross-judge agreement on the comparisons both judged
+    agreement = {}
+    for other in [j for j in by_judge if j != primary]:
+        pk = {(tuple(v["pair"]), tuple(v["item"]), v.get("swapped", False)): v
+              for v in by_judge[primary]}
+        both = [(pk[k], o) for o in by_judge[other]
+                if (k := (tuple(o["pair"]), tuple(o["item"]),
+                          o.get("swapped", False))) in pk]
+        if not both:
+            continue
+        same = sum(1 for a, b in both if a["overall_winner"] == b["overall_winner"])
+        # Cohen's kappa against chance agreement on the observed label mix
+        labs = sorted({x["overall_winner"] for p_, o_ in both for x in (p_, o_)})
+        pa = same / len(both)
+        pe = sum((sum(1 for a, _ in both if a["overall_winner"] == l) / len(both))
+                 * (sum(1 for _, b in both if b["overall_winner"] == l) / len(both))
+                 for l in labs)
+        kappa = (pa - pe) / (1 - pe) if pe < 1 else float("nan")
+        agreement[other] = {"n": len(both), "raw_agreement": pa, "kappa": kappa}
+        print(f"\nagreement {primary} vs {other}: {100*pa:.1f}% raw "
+              f"(kappa={kappa:.3f}) on {len(both)} shared comparisons")
+
+    auto_ties = sum(1 for r in resolved if r.get("winner") == "tie")
+    skipped = sum(1 for r in resolved if r.get("outcome") == "skipped_both_empty")
+    judge_ties = sum(1 for v in verdicts if v["overall_winner"] == "tie")
     ties_tot = sum(c["tie"] for c in cnt.values())
     n_tot = sum(c["n"] for c in cnt.values())
     both_bad = sum(1 for v in verdicts
                    if set(v.get("plausible", {}).values()) == {"no"})
-    print(f"\ntie rate {100*ties_tot/max(1,n_tot):.1f}%   "
+    print(f"\nties: judge {judge_ties}/{len(verdicts)} = "
+          f"{100*judge_ties/max(1,len(verdicts)):.1f}% (the judge's own rate)  |  "
+          f"structural auto-ties {auto_ties} (identical selections)  |  "
+          f"{skipped} skipped (both empty)")
+    print(f"combined tie rate in the matrix {100*ties_tot/max(1,n_tot):.1f}%   "
           f"both-bad {100*both_bad/max(1,len(verdicts)):.1f}%   "
           f"flip rate {'n/a' if flip_rate is None else f'{100*flip_rate:.1f}% (n={len(both)})'}")
 
     # ---- artifact for eval/summary_table.py
+    # Key by the canonical "<mode>/<model>" system id the other metric columns
+    # use, not by this module's short labels -- otherwise the judge column lands
+    # in its own rows instead of merging into the existing ones.
+    canon_id = {}
+    for spec in json.load(open(args.systems)):
+        canon_id[spec["label"]] = (spec["path"] if spec["path"].startswith("baseline:")
+                                   else run_key(spec["path"]))
     runs = {}
     for s in systems:
         k, n = plaus.get(s, [0, 0])
         per = {"bt_winrate": bt[s] / z, "bt_theta": bt[s],
                "plausible_rate": (k / n if n else None), "plausible_n": n,
                "minimality_winrate": (mini[s][0] / mini[s][1] if mini[s][1] else None)}
-        runs[s] = {sub: per for sub in SUBSETS}      # pooled fit; see docstring
-    data = {"judge_model": MODEL, "effort": EFFORT, "thinking": THINKING["type"],
+        runs[canon_id.get(s, s)] = {sub: per for sub in SUBSETS}   # pooled fit
+    data = {"judge_model": primary, "effort": EFFORT, "thinking": THINKING["type"],
             "n_judged": len(verdicts), "n_resolved": len(resolved),
-            "tie_rate": ties_tot / max(1, n_tot),
+            "judges": {j: len(v) for j, v in by_judge.items()},
+            "agreement": agreement,
+            "self_consistency": ({"n": repeats, "identical": agree,
+                                  "rate": agree / repeats} if repeats else None),
+            "tie_rate_judge": judge_ties / max(1, len(verdicts)),
+            "tie_rate_combined": ties_tot / max(1, n_tot),
+            "auto_ties": auto_ties, "skipped_both_empty": skipped,
             "both_bad_rate": both_bad / max(1, len(verdicts)),
             "flip_rate": flip_rate, "flip_n": len(both),
             "matrix": matrix, "intransitive_triads": cycles, "runs": runs}
