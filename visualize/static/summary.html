@@ -137,10 +137,28 @@ function renderJudge(j) {
     `judge tie rate <b>${pc(j.tie_rate_judge)}%</b>`,
     `both-bad <b>${pc(j.both_bad_rate)}%</b>`,
     `intransitive triads <b>${(j.intransitive_triads || []).length}</b>`,
-    j.flip_rate == null ? `position-bias flip rate <b>not measured</b>`
-      : `flip rate <b>${pc(j.flip_rate)}%</b> (n=${j.flip_n})`,
     sc ? `self-consistency <b>${pc(sc.rate)}%</b> (${sc.identical}/${sc.n} re-scored)` : null,
   ].filter(Boolean).join(" · ");
+
+  // Position bias gets its own row: the flip rate says how often a verdict
+  // changed when A and B were swapped, and the A-preference says whether those
+  // changes are noise or a systematic preference for whatever is shown first.
+  const pb = j.position_bias;
+  const posRow = j.flip_rate == null
+    ? `<tr><td>position bias</td><td colspan="2" class="na">not measured — run
+         <code>--stage submit --swap</code></td></tr>`
+    : `<tr>
+         <td>flip rate (verdict changed when A/B swapped)</td>
+         <td>${pc(j.flip_rate)}%</td>
+         <td class="ci">n=${j.flip_n} paired comparisons</td>
+       </tr>` + (pb ? `<tr>
+         <td>chose the first-shown selection</td>
+         <td>${pc(pb.a_preference)}%<span class="ci"> [${pc(pb.ci_low)}, ${
+           pc(pb.ci_high)}]</span></td>
+         <td class="ci">${pb.unbiased
+           ? "50% inside the interval → no detectable position bias"
+           : "50% outside the interval → position bias present"}</td>
+       </tr>` : "");
 
   const agree = Object.entries(j.agreement || {}).map(([m, a]) =>
     `<p><b>Agreement with ${esc(m)}:</b> ${pc(a.raw_agreement)}% raw, κ=${
@@ -152,6 +170,11 @@ function renderJudge(j) {
     <table>
       <thead><tr><th>system</th><th>BT share</th><th>plausible</th><th>minimality</th></tr></thead>
       <tbody>${rateRows}</tbody>
+    </table>
+    <h2 style="margin-top:18px">Reliability</h2>
+    <table>
+      <thead><tr><th>check</th><th>value</th><th></th></tr></thead>
+      <tbody>${posRow}</tbody>
     </table>
     <h2 style="margin-top:18px">Win matrix — row beats column</h2>
     <div class="rel">decisive comparisons only (ties excluded); ± is the half-width

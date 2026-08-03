@@ -107,6 +107,7 @@ def judge_detail():
         "auto_ties": d.get("auto_ties"), "skipped": d.get("skipped_both_empty"),
         "both_bad_rate": d.get("both_bad_rate"),
         "flip_rate": d.get("flip_rate"), "flip_n": d.get("flip_n"),
+        "position_bias": d.get("position_bias"),
         "self_consistency": d.get("self_consistency"),
         "agreement": d.get("agreement", {}),
         "ci_method": d.get("ci_method", {}),
