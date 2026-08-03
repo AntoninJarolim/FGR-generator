@@ -331,10 +331,6 @@ def stage_submit(args):
 
     os.makedirs(args.work, exist_ok=True)
     tag = args.tag
-    with open(os.path.join(args.work, f"{tag}.resolved.jsonl"), "w",
-              encoding="utf-8") as f:
-        for r in resolved:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     reqs, mapping = [], {}
     for i, cmp_ in enumerate(to_judge):
@@ -342,13 +338,20 @@ def stage_submit(args):
         mapping[cid] = {k: cmp_[k] for k in
                         ("pair", "item", "system_a", "system_b", "swapped")}
         reqs.append({"custom_id": cid, "params": request_params(cmp_)})
-    with open(os.path.join(args.work, f"{tag}.map.json"), "w") as f:
-        json.dump(mapping, f)
-
     if args.dry_run:
         print("--dry-run: not submitting")
         return
+    # Submit FIRST, then persist. Writing the sidecar artifacts before the API
+    # call means a failed submit (out of credits, rate limit) leaves a stray
+    # <tag>.resolved.jsonl behind, and aggregation would count its auto-ties on
+    # top of the run that actually happened.
     batch = client().messages.batches.create(requests=reqs)
+    with open(os.path.join(args.work, f"{tag}.map.json"), "w") as f:
+        json.dump(mapping, f)
+    with open(os.path.join(args.work, f"{tag}.resolved.jsonl"), "w",
+              encoding="utf-8") as f:
+        for r in resolved:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
     with open(os.path.join(args.work, f"{tag}.batch.json"), "w") as f:
         json.dump({"id": batch.id, "n": len(reqs), "swap": args.swap,
                    "created": time.time()}, f)
@@ -448,6 +451,37 @@ def fit_bt(wins, labels, iters=2000, tol=1e-10):
             break
         p = new
     return p
+
+
+def bootstrap_bt(pool, systems, reps=400, seed=0):
+    """Percentile bootstrap CI for the Bradley-Terry strengths.
+
+    BT is fitted by an iterative MM procedure, so there is no closed-form
+    standard error for theta. Resampling comparisons with replacement and
+    refitting propagates the sampling variability of the comparison set into the
+    published leaderboard number -- which matters because the model-based CI
+    would understate it anyway whenever transitivity does not hold exactly.
+    """
+    rng = random.Random(seed)
+    n = len(pool)
+    draws = defaultdict(list)
+    for _ in range(reps):
+        wins = defaultdict(float)
+        for _ in range(n):
+            x, y, w = pool[rng.randrange(n)]
+            if w == "tie":
+                wins[(x, y)] += 0.5
+                wins[(y, x)] += 0.5
+            else:
+                wins[(w, y if w == x else x)] += 1
+        p = fit_bt(wins, systems, iters=400)
+        z = sum(p.values()) or 1.0
+        for s in systems:
+            draws[s].append(p[s] / z)
+    def pct(v, q):
+        v = sorted(v)
+        return v[min(len(v) - 1, max(0, int(q / 100 * (len(v) - 1))))]
+    return {s: (pct(v, 2.5), pct(v, 97.5)) for s, v in draws.items()}
 
 
 def stage_aggregate(args):
@@ -592,29 +626,41 @@ def stage_aggregate(args):
             print(f"  {s:22s} {p*100:5.1f}%  [{lo*100:5.1f},{hi*100:5.1f}]  n={n}")
 
     # ---- minimality
-    mini = defaultdict(lambda: [0.0, 0])
+    # Decisive-only, so the rate is a genuine binomial proportion and a Wilson
+    # interval applies. A ties-split rate is not binomial and its CI would be a
+    # fudge; ties are reported separately instead.
+    mini = defaultdict(lambda: [0, 0, 0])          # [wins, decisive, ties]
     for v in verdicts:
         x, y = v["pair"]
         w = v["minimality_winner"]
-        for s in (x, y):
-            mini[s][1] += 1
         if w == "tie":
-            mini[x][0] += 0.5
-            mini[y][0] += 0.5
+            mini[x][2] += 1
+            mini[y][2] += 1
         else:
+            for s in (x, y):
+                mini[s][1] += 1
             mini[w][0] += 1
-    print("\n=== minimality win rate (ties split) ===")
+    print("\n=== minimality win rate (decisive only, Wilson 95% CI) ===")
     for s in systems:
-        k, n = mini.get(s, [0, 0])
+        k, n, tz = mini.get(s, [0, 0, 0])
         if n:
-            print(f"  {s:22s} {100*k/n:5.1f}%  n={n}")
+            pr, lo, hi = wilson(k, n)
+            print(f"  {s:22s} {pr*100:5.1f}%  [{lo*100:5.1f},{hi*100:5.1f}]  "
+                  f"n={n} (+{tz} ties)")
 
     # ---- BT
     bt = fit_bt(wins_half, systems)
     z = sum(bt.values())
-    print("\n=== Bradley-Terry (secondary; matrix above is primary) ===")
+    pool = [(v["pair"][0], v["pair"][1], v["overall_winner"]) for v in verdicts]
+    pool += [(r["pair"][0], r["pair"][1], "tie")
+             for r in resolved if r.get("winner") == "tie"]
+    bt_ci = bootstrap_bt(pool, systems, reps=args.bootstrap, seed=args.seed)
+    print(f"\n=== Bradley-Terry (secondary; matrix above is primary) "
+          f"— {args.bootstrap}x percentile bootstrap ===")
     for s in sorted(systems, key=lambda s: -bt[s]):
-        print(f"  {s:22s} theta={bt[s]:7.3f}  normalised={bt[s]/z*100:5.1f}%")
+        lo, hi = bt_ci[s]
+        print(f"  {s:22s} theta={bt[s]:7.3f}  share={bt[s]/z*100:5.1f}%  "
+              f"[{lo*100:5.1f},{hi*100:5.1f}]")
 
     # ---- cross-judge agreement on the comparisons both judged
     agreement = {}
@@ -664,9 +710,16 @@ def stage_aggregate(args):
     runs = {}
     for s in systems:
         k, n = plaus.get(s, [0, 0])
+        pl_p, pl_lo, pl_hi = wilson(k, n) if n else (None, None, None)
+        mw, mn, mt = mini.get(s, [0, 0, 0])
+        mi_p, mi_lo, mi_hi = wilson(mw, mn) if mn else (None, None, None)
         per = {"bt_winrate": bt[s] / z, "bt_theta": bt[s],
-               "plausible_rate": (k / n if n else None), "plausible_n": n,
-               "minimality_winrate": (mini[s][0] / mini[s][1] if mini[s][1] else None)}
+               "bt_ci_low": bt_ci[s][0], "bt_ci_high": bt_ci[s][1],
+               "plausible_rate": pl_p, "plausible_ci_low": pl_lo,
+               "plausible_ci_high": pl_hi, "plausible_n": n,
+               "minimality_winrate": mi_p, "minimality_ci_low": mi_lo,
+               "minimality_ci_high": mi_hi, "minimality_n": mn,
+               "minimality_ties": mt}
         runs[canon_id.get(s, s)] = {sub: per for sub in SUBSETS}   # pooled fit
     data = {"judge_model": primary, "effort": EFFORT, "thinking": THINKING["type"],
             "n_judged": len(verdicts), "n_resolved": len(resolved),
@@ -679,7 +732,22 @@ def stage_aggregate(args):
             "auto_ties": auto_ties, "skipped_both_empty": skipped,
             "both_bad_rate": both_bad / max(1, len(verdicts)),
             "flip_rate": flip_rate, "flip_n": len(both),
-            "matrix": matrix, "intransitive_triads": cycles, "runs": runs}
+            "matrix": matrix, "intransitive_triads": cycles, "runs": runs,
+            "systems": systems, "system_ids": {s: canon_id.get(s, s) for s in systems},
+            "ci_method": {
+                "rates": "Wilson score interval, 95%, on decisive comparisons "
+                         "(ties excluded). Chosen over the normal-approximation "
+                         "(Wald) interval because several rates sit near 0 or 1 "
+                         "-- lexical wins 2.8% of comparisons and is plausible "
+                         "26% of the time -- where Wald has poor coverage and can "
+                         "put bounds outside [0,1].",
+                "bt": f"Percentile bootstrap, 95%, {args.bootstrap} resamples of "
+                      f"the comparison set with replacement, refitting "
+                      f"Bradley-Terry each time. BT is fitted by iterative MM so "
+                      f"there is no closed-form standard error, and a "
+                      f"model-based one would understate uncertainty wherever "
+                      f"transitivity is imperfect.",
+            }}
     os.makedirs(os.path.dirname(args.json_out), exist_ok=True)
     with open(args.json_out, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -702,6 +770,8 @@ def main():
                     help="invert every A/B assignment (position-bias run)")
     ap.add_argument("--tag", default="main", help="names this run's artifacts")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--bootstrap", type=int, default=400,
+                    help="resamples for the Bradley-Terry percentile bootstrap")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     {"sample": stage_sample, "smoke": stage_smoke, "submit": stage_submit,
