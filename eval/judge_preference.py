@@ -254,8 +254,11 @@ def request_params(cmp_):
     p = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "system": [{"type": "text", "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"}}],
+        # No cache_control: measured on the pilot, batch requests run in
+        # parallel and cannot read a cache entry the others are still writing --
+        # only 9% of cacheable tokens were served from cache, so the 1.25x write
+        # premium on the other 91% made caching a net ~4% LOSS here.
+        "system": SYSTEM_PROMPT,
         "messages": [{"role": "user",
                       "content": user_prompt(cmp_["query"], cmp_["view_a"],
                                              cmp_["view_b"])}],
@@ -364,7 +367,7 @@ def stage_collect(args):
         time.sleep(30)
     out = os.path.join(args.work, f"{args.tag}.verdicts.jsonl")
     n_ok = n_err = 0
-    tok_in = tok_out = 0
+    tok_in = tok_out = tok_cache_read = 0
     with open(out, "w", encoding="utf-8") as f:
         for res in c.messages.batches.results(meta["id"]):
             m = mapping[res.custom_id]
@@ -380,7 +383,12 @@ def stage_collect(args):
                 f.write(json.dumps({**m, "error": f"parse: {e}"}) + "\n")
                 continue
             n_ok += 1
-            tok_in += msg.usage.input_tokens
+            # input_tokens counts only the UNCACHED prefix; cache creation/read
+            # are billed separately (1.25x / 0.10x). Omitting them understates
+            # the bill -- on the pilot by ~30%.
+            tok_in += (msg.usage.input_tokens
+                       + getattr(msg.usage, "cache_creation_input_tokens", 0) or 0)
+            tok_cache_read += getattr(msg.usage, "cache_read_input_tokens", 0) or 0
             tok_out += msg.usage.output_tokens
             # Normalise to system identities so a swapped re-run pools with this
             # one instead of being a throwaway diagnostic.
@@ -394,10 +402,12 @@ def stage_collect(args):
                 "overall_winner": "tie" if v["overall"] == "tie" else sysname(v["overall"]),
                 "usage": {"in": msg.usage.input_tokens, "out": msg.usage.output_tokens},
             }, ensure_ascii=False) + "\n")
-    cost = (tok_in * 5 + tok_out * 25) / 1e6 / 2      # batch = 50%
+    # cache writes already folded into tok_in at 1x; add the 0.25x premium and
+    # the 0.10x reads. Batch is 50% off.
+    cost = (tok_in * 5 + tok_cache_read * 5 * 0.10 + tok_out * 25) / 1e6 / 2
     print(f"{n_ok} ok, {n_err} failed -> {out}")
     if n_ok:
-        print(f"tokens: in={tok_in} out={tok_out} "
+        print(f"tokens: in={tok_in} cache_read={tok_cache_read} out={tok_out} "
               f"(mean {tok_in//n_ok} in / {tok_out//n_ok} out per comparison)")
         print(f"batch cost ${cost:.4f} total, ${cost/n_ok:.5f} per comparison")
 
