@@ -1,0 +1,4 @@
+[
+  {"label": "glm-unc",       "path": "data/extracted_relevancy/long-embed-json/glm-5.2_from0-to12612.jsonl"},
+  {"label": "gemma31B-reas", "path": "data/extracted_relevancy/long-embed-xml-constrained-reasoning/google~gemma-4-31B-it_from0-to12612.jsonl"}
+]
