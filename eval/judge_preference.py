@@ -502,6 +502,24 @@ def stage_aggregate(args):
     def vkey(r):
         return (r.get("judge", MODEL), tuple(r["pair"]), tuple(r["item"]),
                 r.get("swapped", False))
+    # Every run writes a resolved.jsonl for its own item set, so the same
+    # structural fact (both-empty, or byte-identical selections) is recorded once
+    # per run. Those are properties of the systems, not observations, and
+    # duplicating them inflates the tie weight fed to Bradley-Terry -- pulling
+    # strengths toward each other. The win matrix is unaffected, since ties are
+    # excluded from its denominator.
+    rk, uniq_resolved = set(), []
+    for r in resolved:
+        k = (tuple(r["pair"]), tuple(r["item"]))
+        if k in rk:
+            continue
+        rk.add(k)
+        uniq_resolved.append(r)
+    if len(uniq_resolved) != len(resolved):
+        print(f"resolved records: {len(resolved)} -> {len(uniq_resolved)} unique "
+              f"({len(resolved) - len(uniq_resolved)} duplicate structural facts dropped)")
+    resolved = uniq_resolved
+
     seen, verdicts, repeats, agree = {}, [], 0, 0
     for r in raw:
         k = vkey(r)
@@ -555,6 +573,22 @@ def stage_aggregate(args):
     flips = sum(1 for g in both
                 if {x["overall_winner"] for x in g} != {g[0]["overall_winner"]})
     flip_rate = flips / len(both) if both else None
+    # A flip alone does not distinguish random noise from a systematic
+    # preference for whichever selection is shown first. The direct test is the
+    # share of decisive verdicts that picked position A across both orders: with
+    # A/B randomised and no positional preference that share is 50%.
+    pos = None
+    if both:
+        a_picks = dec = 0
+        for g in both:
+            for x in g:
+                if x["raw"]["overall"] != "tie":
+                    dec += 1
+                    a_picks += (x["raw"]["overall"] == "a")
+        if dec:
+            p_, lo_, hi_ = wilson(a_picks, dec)
+            pos = {"a_preference": p_, "ci_low": lo_, "ci_high": hi_,
+                   "n_decisive": dec, "unbiased": lo_ <= 0.5 <= hi_}
 
     # ---- pairwise win matrix + BT input (ties split)
     cnt = defaultdict(lambda: defaultdict(int))
@@ -659,7 +693,7 @@ def stage_aggregate(args):
           f"— {args.bootstrap}x percentile bootstrap ===")
     for s in sorted(systems, key=lambda s: -bt[s]):
         lo, hi = bt_ci[s]
-        print(f"  {s:22s} theta={bt[s]:7.3f}  share={bt[s]/z*100:5.1f}%  "
+        print(f"  {s:22s} strength={bt[s]:7.3f}  share={bt[s]/z*100:5.1f}%  "
               f"[{lo*100:5.1f},{hi*100:5.1f}]")
 
     # ---- cross-judge agreement on the comparisons both judged
@@ -698,6 +732,11 @@ def stage_aggregate(args):
     print(f"combined tie rate in the matrix {100*ties_tot/max(1,n_tot):.1f}%   "
           f"both-bad {100*both_bad/max(1,len(verdicts)):.1f}%   "
           f"flip rate {'n/a' if flip_rate is None else f'{100*flip_rate:.1f}% (n={len(both)})'}")
+    if pos:
+        print(f"position bias: chose the first-shown selection in "
+              f"{100*pos['a_preference']:.1f}% of {pos['n_decisive']} decisive verdicts "
+              f"[{100*pos['ci_low']:.1f}, {100*pos['ci_high']:.1f}] -> "
+              f"{'no detectable bias (50% inside the interval)' if pos['unbiased'] else 'BIASED'}")
 
     # ---- artifact for eval/summary_table.py
     # Key by the canonical "<mode>/<model>" system id the other metric columns
@@ -713,7 +752,7 @@ def stage_aggregate(args):
         pl_p, pl_lo, pl_hi = wilson(k, n) if n else (None, None, None)
         mw, mn, mt = mini.get(s, [0, 0, 0])
         mi_p, mi_lo, mi_hi = wilson(mw, mn) if mn else (None, None, None)
-        per = {"bt_winrate": bt[s] / z, "bt_theta": bt[s],
+        per = {"bt_winrate": bt[s] / z, "bt_strength": bt[s],
                "bt_ci_low": bt_ci[s][0], "bt_ci_high": bt_ci[s][1],
                "plausible_rate": pl_p, "plausible_ci_low": pl_lo,
                "plausible_ci_high": pl_hi, "plausible_n": n,
@@ -731,7 +770,7 @@ def stage_aggregate(args):
             "tie_rate_combined": ties_tot / max(1, n_tot),
             "auto_ties": auto_ties, "skipped_both_empty": skipped,
             "both_bad_rate": both_bad / max(1, len(verdicts)),
-            "flip_rate": flip_rate, "flip_n": len(both),
+            "flip_rate": flip_rate, "flip_n": len(both), "position_bias": pos,
             "matrix": matrix, "intransitive_triads": cycles, "runs": runs,
             "systems": systems, "system_ids": {s: canon_id.get(s, s) for s in systems},
             "ci_method": {
