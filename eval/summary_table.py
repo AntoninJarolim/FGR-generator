@@ -101,6 +101,10 @@ def judge_detail():
         "systems": d.get("systems", []),
         "system_ids": d.get("system_ids", {}),
         "matrix": d.get("matrix", {}),
+        # One block per judge (matrix + per-system rates + BT), so a second
+        # judge run renders its own table instead of only an agreement number.
+        "per_judge": d.get("per_judge", {}),
+        "judges": d.get("judges", {}),
         "runs": d.get("runs", {}),
         "intransitive_triads": d.get("intransitive_triads", []),
         "tie_rate_judge": d.get("tie_rate_judge"),
