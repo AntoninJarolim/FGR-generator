@@ -17,17 +17,19 @@
 #                                           # engages after </think>; writes to a
 #                                           # separate "-reasoning" dir
 #   ./run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
+#   ./run_generate_vllm.sh --json           # JSON format instead of XML (unconstrained only)
 #   ./run_generate_vllm.sh --model google/gemma-4-31B-it   # just this model, not a whole list
 #   ./run_generate_vllm.sh --model A --model B             # repeatable
 #   ./run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
 # --- Argument parsing ---
-# --dry-run and --constrained are consumed here; everything else is
+# --dry-run, --json and --constrained are consumed here; everything else is
 # forwarded to llm_extraction.py.
 DRY_RUN=0
 CONSTRAINED=0
 REASONING=0
+JSON_FORMAT=0
 PICKED_MODELS=()
 EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
@@ -35,6 +37,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --constrained) CONSTRAINED=1 ;;
     --reasoning) REASONING=1 ;;
+    --json) JSON_FORMAT=1 ;;
     --model) shift; PICKED_MODELS+=("$1") ;;
     --model=*) PICKED_MODELS+=("${1#--model=}") ;;
     *) EXTRA_ARGS+=("$1") ;;
@@ -59,6 +62,20 @@ fi
 #   * --constrained: per-document substring grammar, every span guaranteed
 #     verbatim -> data/extracted_relevancy/long-embed-xml-constrained/
 TEMPLATE_FILE="templates/long-embed-xml.template"
+if [ "$JSON_FORMAT" -eq 1 ]; then
+  # The span grammar is a substring grammar over the XML span format; there is
+  # deliberately no JSON-constrained mode (see llm_extraction.py's mode_dir
+  # comment), so refuse the combination rather than silently creating a
+  # long-embed-json-constrained dir nothing else in eval/ knows about.
+  if [ "$CONSTRAINED" -eq 1 ]; then
+    echo "ERROR: --json cannot be combined with --constrained; the span grammar" >&2
+    echo "       applies to the XML span format only." >&2
+    exit 1
+  fi
+  TEMPLATE_FILE="templates/long-embed-json.template"
+  echo "JSON format: writing to data/extracted_relevancy/long-embed-json/."
+fi
+
 MODE_ARGS=()
 if [ "$CONSTRAINED" -eq 1 ]; then
   echo "CONSTRAINED: per-document span-grammar decoding (verbatim spans)."
