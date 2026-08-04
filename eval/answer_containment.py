@@ -51,7 +51,8 @@ AC_VERSION = 1
 
 QA_SUBSETS = ("narrativeqa", "2wikimqa")
 SHORT_ANSWER_CHARS = 3
-MODES = ("long-embed-json", "long-embed-xml", "long-embed-xml-constrained")
+MODES = ("long-embed-json", "long-embed-xml", "long-embed-xml-constrained",
+         "long-embed-xml-constrained-reasoning")
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(EVAL_DIR, ".cache")

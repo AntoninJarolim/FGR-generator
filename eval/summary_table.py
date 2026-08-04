@@ -159,14 +159,16 @@ def order_systems(systems):
     def key(s):
         if s.startswith("long-embed-xml-constrained/"):
             group = 0
-        elif s.startswith("long-embed-xml/"):
+        elif s.startswith("long-embed-xml-constrained-reasoning/"):
             group = 1
-        elif s.startswith("long-embed-json/"):
+        elif s.startswith("long-embed-xml/"):
             group = 2
-        elif s.startswith("baseline:"):
+        elif s.startswith("long-embed-json/"):
             group = 3
-        else:
+        elif s.startswith("baseline:"):
             group = 4
+        else:
+            group = 5
         return (group, s)
     return sorted(systems, key=key)
 
@@ -176,6 +178,7 @@ def short_name(system):
     # from every row label; the trailing generic strip catches any variant not
     # named explicitly above.
     return (system
+            .replace("long-embed-xml-constrained-reasoning/", "xml-con+think ")
             .replace("long-embed-xml-constrained/", "xml-con ")
             .replace("long-embed-xml/", "xml-unc ")
             .replace("long-embed-json/", "json-unc ")
