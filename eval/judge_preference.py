@@ -840,15 +840,41 @@ def stage_aggregate(args):
         # self_agreement is the noise ceiling: how often two samples of the SAME
         # comparison agree with each other. Agreement inside the unanimous bucket
         # is the cleanest read -- there the judge has no noise left to remove.
+        # Per bucket the two rates are kept on the SAME denominator -- the
+        # bucket's comparison count -- so a percentage-point gap converts to a
+        # comparison count by multiplying. `maj_hits` is an integer (voting emits
+        # one label per comparison); `single_expected` is sum(p_i), the number of
+        # comparisons that would match if a single sample were drawn for each.
+        # Their difference is exactly what voting buys or costs in that bucket.
         hits = tot = 0
         pair_same = pair_tot = 0
-        buckets = {"unanimous": [0, 0], "strong": [0, 0], "split": [0, 0]}
+        B = ("unanimous", "strong", "split")
+        buckets = {k_: {"n": 0, "maj_hits": 0, "single_expected": 0.0,
+                        "n_samples": 0} for k_ in B}
+        # "What if I run it once?" needs a spread, not just the mean. Two reads:
+        #   runs[r]  -- take the r-th sample of every presentation and score that
+        #               as one complete single-run annotator. The observed spread
+        #               over these runs is what re-running the judge would feel
+        #               like. Replicate order is file order, which is arbitrary
+        #               but independent of the primary's label, so this is a fair
+        #               resample rather than a ranking.
+        #   var_p    -- sum p_i(1-p_i), the exact variance of a single random
+        #               draw per presentation. sd = sqrt(var_p)/n. It needs no
+        #               run bookkeeping and is the analytic version of the above.
+        runs = defaultdict(lambda: [0, 0])          # replicate index -> [hits, n]
+        var_p = 0.0
         for prim, o in both:
             labs = samples.get((other, tuple(o["pair"]), tuple(o["item"]),
                                 o.get("swapped", False)), [o["overall_winner"]])
             gold = prim["overall_winner"]
-            hits += sum(1 for l in labs if l == gold)
+            match = sum(1 for l in labs if l == gold)
+            hits += match
             tot += len(labs)
+            p_i = match / len(labs)
+            var_p += p_i * (1 - p_i)
+            for r, l in enumerate(labs):
+                runs[r][1] += 1
+                runs[r][0] += (l == gold)
             for i in range(len(labs)):
                 for jx in range(i + 1, len(labs)):
                     pair_tot += 1
@@ -856,28 +882,75 @@ def stage_aggregate(args):
             top = Counter(labs).most_common(1)[0][1] / len(labs)
             b = ("unanimous" if top == 1 else
                  "strong" if top > 0.5 else "split")
-            buckets[b][1] += 1
-            buckets[b][0] += (o["overall_winner"] == gold)
+            v = buckets[b]
+            v["n"] += 1
+            v["maj_hits"] += (o["overall_winner"] == gold)
+            v["single_expected"] += match / len(labs)
+            v["n_samples"] += len(labs)
         if tot:
+            # Only runs that cover (nearly) every presentation are comparable as
+            # whole annotators; the tail replicates exist for a few hundred
+            # re-submitted presentations and would look artificially extreme on
+            # their own much smaller denominator.
+            n_cmp = len(both)
+            full = [{"run": r, "n": v[1], "agreement": v[0] / v[1]}
+                    for r, v in sorted(runs.items()) if v[1] >= 0.9 * n_cmp]
+            partial = [{"run": r, "n": v[1], "agreement": v[0] / v[1]}
+                       for r, v in sorted(runs.items()) if v[1] < 0.9 * n_cmp]
+            rates = [x["agreement"] for x in full]
+            mean_r = sum(rates) / len(rates) if rates else None
+            sd_r = (math.sqrt(sum((x - mean_r) ** 2 for x in rates) / (len(rates) - 1))
+                    if len(rates) > 1 else None)
             agreement[other].update(
                 single_sample_agreement=hits / tot,
                 self_agreement=(pair_same / pair_tot) if pair_tot else None,
                 n_samples=tot,
-                by_confidence={k_: {"agreement": v[0] / v[1], "n": v[1]}
-                               for k_, v in buckets.items() if v[1]})
+                single_runs=full, single_runs_partial=partial,
+                single_run_mean=mean_r, single_run_sd=sd_r,
+                single_run_min=min(rates) if rates else None,
+                single_run_max=max(rates) if rates else None,
+                # sd of ONE random draw per presentation, from sum p_i(1-p_i)
+                single_draw_sd=math.sqrt(var_p) / n_cmp if n_cmp else None,
+                by_confidence={k_: dict(v, agreement=v["maj_hits"] / v["n"],
+                                        single=v["single_expected"] / v["n"])
+                               for k_, v in buckets.items() if v["n"]})
             a_ = agreement[other]
+            # Two decimals: the whole point is whether majority differs from
+            # single at all, and the gap here is under a tenth of a point.
             print(f"\n=== {other} as an annotator vs {primary} ===")
-            print(f"  single sample     {a_['single_sample_agreement']*100:5.1f}%  "
+            print(f"  single sample     {a_['single_sample_agreement']*100:6.2f}%  "
                   f"({tot} sample-vs-{primary} pairs)")
-            print(f"  majority vote     {pa*100:5.1f}%  (kappa {kappa:.3f})")
+            print(f"  majority vote     {pa*100:6.2f}%  (kappa {kappa:.3f})")
+            if sd_r is not None:
+                print(f"  one whole run     {mean_r*100:6.2f}% +- {sd_r*100:.2f} sd  "
+                      f"(range {a_['single_run_min']*100:.2f}-"
+                      f"{a_['single_run_max']*100:.2f} over {len(rates)} runs; "
+                      f"analytic sd {a_['single_draw_sd']*100:.2f})")
+                print("    per-run: " + "  ".join(f"{x['agreement']*100:.2f}" for x in full))
+                if partial:
+                    print(f"    ({len(partial)} tail replicate(s) omitted: "
+                          + ", ".join(f"n={x['n']}" for x in partial) + ")")
             if a_['self_agreement'] is not None:
-                print(f"  self-agreement    {a_['self_agreement']*100:5.1f}%  "
+                print(f"  self-agreement    {a_['self_agreement']*100:6.2f}%  "
                       f"(noise ceiling: two samples of the same comparison)")
             for k_, v in a_["by_confidence"].items():
-                print(f"    {k_:10s} n={v['n']:6d}  agrees {v['agreement']*100:5.1f}%")
+                print(f"    {k_:10s} n={v['n']:6d}  majority {v['agreement']*100:6.2f}%  "
+                      f"single {v['single']*100:6.2f}%  "
+                      f"({v['maj_hits'] - v['single_expected']:+6.1f} comparisons)")
             print("  majority ~= single -> the gap is systematic, not sampling noise"
                   if abs(pa - a_['single_sample_agreement']) < 0.02
                   else "  majority > single -> voting removes real sampling noise")
+            # The headline near-equality can hide two large opposing effects: a
+            # real gain wherever a majority exists, cancelled by the no-majority
+            # bucket, where vote() emits the literal label "tie" and so almost
+            # always disagrees. Report the has-majority subset so the cancelling
+            # is visible rather than folded into one number.
+            hm = [v for k_, v in a_["by_confidence"].items() if k_ != "split"]
+            if hm and any(v["n"] for v in hm):
+                n_hm = sum(v["n"] for v in hm)
+                print(f"  where a majority exists: n={n_hm}  "
+                      f"majority {100*sum(v['maj_hits'] for v in hm)/n_hm:6.2f}%  "
+                      f"single {100*sum(v['single_expected'] for v in hm)/n_hm:6.2f}%")
         print(f"\nagreement {primary} vs {other}: {100*pa:.1f}% raw "
               f"(kappa={kappa:.3f}) on {len(both)} shared comparisons")
 

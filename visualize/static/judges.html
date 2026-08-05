@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FGR judge comparison</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #dcdfe4; --text: #1c2128;
+    --muted: #6b7280; --accent: #2563eb; --bad: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 40px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header a.home { text-decoration: none; font-size: 18px; color: var(--muted); }
+  header a.home:hover { color: var(--accent); }
+  header h1 { font-size: 15px; margin: 0; }
+  main { max-width: 900px; margin: 0 auto; padding: 20px 16px; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 4px 0 22px; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px 16px; margin-bottom: 22px; }
+  section h2 { margin: 0 0 10px; font-size: 15px; }
+  /* Each section is one "level" at which two judges can be compared; the kicker
+     names the unit of analysis so the page reads as a zoom from coarse to fine. */
+  .level { color: var(--accent); font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .08em; margin: 0 0 2px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #eef0f3; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.na { color: var(--muted); }
+  .loading { color: var(--muted); padding: 10px 0; }
+  .err { color: var(--bad); }
+  .ci { color: var(--muted); font-size: 11.5px; }
+  .cnt { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  td.diag { color: var(--border); }
+  td.win { background: #eaf3ea; }
+  td.loss { background: #fbecec; }
+  td.up { color: #15803d; } td.down { color: var(--bad); }
+  .method { background: #f8f9fb; border-left: 3px solid var(--accent);
+    padding: 10px 12px; margin-top: 14px; font-size: 12.5px; color: #333; }
+  .method b { color: var(--text); }
+  .method p { margin: 0 0 8px; }
+  .method p:last-child { margin-bottom: 0; }
+  .rel { font-size: 12.5px; color: var(--muted); margin: 2px 0 12px; }
+  .rel b { color: var(--text); font-weight: 600; }
+  /* stacked bar for the sample-agreement distribution */
+  .dist { display: flex; height: 26px; border-radius: 5px; overflow: hidden;
+    margin: 10px 0 6px; border: 1px solid var(--border); }
+  .dist span { display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #fff; white-space: nowrap; min-width: 0; }
+  /* not scoped to .dist, so the legend swatches reuse the same colours */
+  .b-unanimous { background: #2f7d4f; }
+  .b-strong    { background: #6b9bd1; }
+  .b-split     { background: #c2554d; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px;
+    color: var(--muted); margin-bottom: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 5px; vertical-align: baseline; }
+  .rank { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* single-run scatter: each dot is one whole run, the bar is the majority vote */
+  .runline { position: relative; height: 30px; margin: 8px 0 2px;
+    background: linear-gradient(#f4f5f7, #f4f5f7) center/100% 2px no-repeat;
+    border-radius: 4px; }
+  .runline .dot { position: absolute; top: 9px; width: 11px; height: 11px;
+    margin-left: -5.5px; border-radius: 50%; background: #6b9bd1;
+    border: 1px solid #fff; }
+  .runline .maj { position: absolute; top: 0; width: 2px; height: 30px;
+    margin-left: -1px; background: var(--bad); }
+  .runaxis { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 11px; margin-bottom: 6px; }
+  .runvals { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .runvals code { font-variant-numeric: tabular-nums; background: #f4f5f7;
+    border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px;
+    color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <a class="home" href="." title="dashboard">⌂</a>
+  <h1>FGR-JUDGE-COMPARISON — how much to trust the judge</h1>
+</header>
+<main>
+  <div id="note" class="note">loading…</div>
+  <div id="content"><div class="loading">loading judge results…</div></div>
+</main>
+
+<script>
+"use strict";
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const pc = v => v == null ? "—" : (v * 100).toFixed(1);
+// Agreement figures get two decimals: the question is whether majority voting
+// differs from a single sample at all, and the gap is under a tenth of a point.
+const pc2 = v => v == null ? "—" : (v * 100).toFixed(2);
+const withCi = (v, lo, hi) => v == null ? '<td class="na">—</td>'
+  : `<td>${pc(v)}<span class="ci"> [${pc(lo)}, ${pc(hi)}]</span></td>`;
+const short = s => s.replace("gemma31B-", "g31-").replace("-unc", "-u")
+  .replace("-con", "-c").replace("-reas", "-r");
+
+async function main() {
+  const content = document.getElementById("content");
+  const noteEl = document.getElementById("note");
+  let j;
+  try {
+    j = await (await fetch("api/judges")).json();
+    if (j.error) throw new Error(j.error);
+  } catch (e) {
+    noteEl.textContent = "";
+    content.innerHTML = `<div class="err">failed to load judge results: ${esc(e.message)}</div>`;
+    return;
+  }
+  const perJudge = j.per_judge || {};
+  const primary = j.judge_model;
+  const others = Object.keys(perJudge).filter(m => m !== primary);
+  noteEl.innerHTML = `Primary judge <b>${esc(primary || "?")}</b>`
+    + (others.length ? ` vs <b>${others.map(esc).join(", ")}</b>. Sections run from
+        the coarsest comparison (do they rank the systems the same?) down to the
+        finest (does one judge agree with itself?).`
+      : `. Only one judge has run, so the cross-judge levels are empty — run
+         <code>eval/judge_vllm.py</code> for a second, family-disjoint judge.`)
+    + ` The span-extraction metric tables live on the
+        <a href="summary">performance page</a>.`;
+
+  content.innerHTML = [
+    renderRanking(j, perJudge, primary, others),
+    renderMatrixLevel(j, perJudge, primary, others),
+    renderVerdictLevel(j, primary, others),
+    renderSampleLevel(j, perJudge, primary, others),
+    renderReliability(j, primary),
+  ].join("");
+}
+
+// ---- level 1: ranking --------------------------------------------------------
+// The coarsest question, and the one a paper actually leans on: do the judges put
+// the systems in the same order? Two judges can disagree on most individual
+// comparisons and still agree here, which is the whole reason to look separately.
+function renderRanking(j, perJudge, primary, others) {
+  const models = [primary, ...others].filter(m => perJudge[m]);
+  if (!models.length) return "";
+  const ranked = m => Object.entries(perJudge[m].per_system || {})
+    .sort((a, b) => (b[1].bt_winrate || 0) - (a[1].bt_winrate || 0));
+  const systems = ranked(models[0]).map(([s]) => s);
+
+  const head = `<th>system</th>` + models.map(m =>
+    `<th>${esc(short(m.replace("openai/", "")))}</th>`).join("");
+  const pos = {};
+  models.forEach(m => ranked(m).forEach(([s], i) => { (pos[s] = pos[s] || {})[m] = i + 1; }));
+  const rows = systems.map(s => `<tr>
+      <td>${esc(s)}</td>
+      ${models.map(m => {
+        const v = (perJudge[m].per_system || {})[s];
+        if (!v) return '<td class="na">—</td>';
+        return `<td><span class="rank">#${pos[s][m]}</span> ${pc(v.bt_winrate)}<span
+          class="ci"> [${pc(v.bt_ci_low)}, ${pc(v.bt_ci_high)}]</span></td>`;
+      }).join("")}
+    </tr>`).join("");
+
+  // Rank correlation over the systems both judges ranked. Spearman on 6 systems
+  // is coarse, but it is the honest summary of "same order or not".
+  let corr = "";
+  if (models.length > 1) {
+    const a = systems.map(s => pos[s][models[0]]), b = systems.map(s => pos[s][models[1]]);
+    const n = a.length;
+    const d2 = a.reduce((acc, x, i) => acc + (x - b[i]) ** 2, 0);
+    const rho = 1 - (6 * d2) / (n * (n * n - 1));
+    const swaps = systems.filter(s => pos[s][models[0]] !== pos[s][models[1]]).length;
+    const spread = m => {
+      const r = ranked(m).map(([, v]) => v.bt_winrate);
+      return (r[0] - r[r.length - 1]) * 100;
+    };
+    corr = `<div class="method">
+      <p><b>Spearman ρ = ${rho.toFixed(3)}</b> on ${n} systems;
+         ${swaps} system(s) sit at a different rank.</p>
+      <p>Top-to-bottom spread: <b>${spread(models[0]).toFixed(1)}pp</b> for
+         ${esc(models[0])} vs <b>${spread(models[1]).toFixed(1)}pp</b> for
+         ${esc(models[1])}. A judge that compresses the spread separates the
+         systems less, even where it keeps the same order.</p></div>`;
+  }
+  return `<section>
+    <p class="level">Level 1 · per system</p>
+    <h2>Ranking — Bradley–Terry share, each judge fitted separately</h2>
+    <div class="rel">rank and share with its 95% bootstrap interval</div>
+    <table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>
+    ${corr}
+  </section>`;
+}
+
+// ---- level 2: win matrix -----------------------------------------------------
+function renderMatrixLevel(j, perJudge, primary, others) {
+  const models = [primary, ...others].filter(m => perJudge[m]);
+  if (!models.length) return "";
+  const panels = models.map(m => {
+    const b = perJudge[m];
+    const { mhead, mrows, trials } = judgeTables(b.per_system, b.matrix);
+    const reps = b.mean_replicates;
+    const rel = [
+      `judge <b>${esc(m)}</b>`,
+      `<b>${b.n_judged}</b> presentations`,
+      reps ? `<b>${reps.toFixed(1)}</b> sample(s) each, majority-voted per field` : null,
+      b.tie_rate_judge != null ? `tie rate <b>${pc(b.tie_rate_judge)}%</b>` : null,
+    ].filter(Boolean).join(" · ");
+    return `<div class="rel" style="margin-top:14px">${rel}</div>
+      ${matrixNote(trials)}
+      <table><thead><tr>${mhead}</tr></thead><tbody>${mrows}</tbody></table>`;
+  }).join("");
+
+  // Where the two judges actually diverge, cell by cell. Signed so a positive
+  // number means the primary rates the row system higher than the other judge.
+  let delta = "";
+  if (models.length > 1) {
+    const [A, B] = models;
+    const order = Object.entries(perJudge[A].per_system || {})
+      .sort((a, b) => (b[1].bt_winrate || 0) - (a[1].bt_winrate || 0)).map(([s]) => s);
+    const head = `<th>Δ ${esc(short(A))} − ${esc(short(B.replace("openai/", "")))}</th>`
+      + order.map(s => `<th>${esc(short(s))}</th>`).join("");
+    let worst = null;
+    const rows = order.map(a => `<tr><td>${esc(a)}</td>${order.map(b => {
+      if (a === b) return '<td class="diag">·</td>';
+      const x = (perJudge[A].matrix || {})[`${a}|${b}`];
+      const y = (perJudge[B].matrix || {})[`${a}|${b}`];
+      if (!x || !y) return '<td class="na">—</td>';
+      const d = (x.win_rate - y.win_rate) * 100;
+      if (!worst || Math.abs(d) > Math.abs(worst.d)) worst = { a, b, d };
+      return `<td class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d.toFixed(1)}</td>`;
+    }).join("")}</tr>`).join("");
+    delta = `<h2 style="margin-top:22px">Where the judges disagree — Δ percentage points</h2>
+      <div class="rel">row beats column: positive means <b>${esc(A)}</b> gives the
+        row system a higher win rate than <b>${esc(B)}</b> does${worst
+        ? `. Largest gap: <b>${esc(worst.a)}</b> vs <b>${esc(worst.b)}</b>,
+           ${worst.d > 0 ? "+" : ""}${worst.d.toFixed(1)}pp` : ""}</div>
+      <table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  return `<section>
+    <p class="level">Level 2 · per system pair</p>
+    <h2>Win matrix — row beats column</h2>
+    ${panels}
+    ${delta}
+  </section>`;
+}
+
+// ---- level 3: individual verdicts --------------------------------------------
+function renderVerdictLevel(j, primary, others) {
+  const rows = others.map(m => {
+    const a = (j.agreement || {})[m];
+    if (!a) return "";
+    return `<tr><td>${esc(m)}</td><td>${pc2(a.raw_agreement)}%</td>
+      <td>κ=${a.kappa.toFixed(3)}</td><td class="ci">${a.n} shared presentations</td></tr>`;
+  }).join("");
+  if (!rows) return "";
+  return `<section>
+    <p class="level">Level 3 · per comparison</p>
+    <h2>Verdict agreement with ${esc(primary)}</h2>
+    <div class="rel">on the presentations both judges saw, after majority-voting
+      each judge's own samples</div>
+    <table>
+      <thead><tr><th>judge</th><th>raw</th><th>chance-corrected</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="method"><p>Raw agreement counts matching labels; κ discounts the
+      agreement expected from the label mix alone. Both are computed on the voted
+      label, so they describe the judge you would actually deploy — not one of
+      its samples.</p></div>
+  </section>`;
+}
+
+// ---- level 4: individual samples ---------------------------------------------
+// The finest level, and the one that decides whether a disagreement is fixable.
+// A judge sampled many times per presentation can be split by how unanimous its
+// OWN samples were, which separates "it wasn't sure" from "it was sure and still
+// disagreed".
+const BUCKETS = [
+  ["unanimous", "all samples the same"],
+  ["strong", "a majority exists"],
+  ["split", "no majority (forced tie)"],
+];
+
+// "What if I run it just once?" — answered with a spread rather than a mean.
+// Each run takes one sample per presentation and is scored as a complete
+// annotator, so these are the numbers a single run of this judge would actually
+// produce. The majority-vote figure is plotted against them: if it lands inside
+// the run-to-run scatter, the majority-vs-single difference is noise.
+function renderRuns(a, primary) {
+  const runs = a.single_runs || [];
+  if (runs.length < 2) return "";
+  const rates = runs.map(r => r.agreement);
+  const maj = a.raw_agreement;
+  const lo = Math.min(...rates, maj), hi = Math.max(...rates, maj);
+  const pad = (hi - lo) * 0.15 || 0.001;
+  const x = v => 100 * (v - (lo - pad)) / ((hi + pad) - (lo - pad));
+  const dots = runs.map((r, i) => `<span class="dot" style="left:${x(r.agreement)}%"
+      title="run ${r.run}: ${pc2(r.agreement)}% on ${r.n} presentations"></span>`).join("");
+  const beaten = rates.filter(v => v > maj).length;
+  const within = maj >= a.single_run_mean - a.single_run_sd
+              && maj <= a.single_run_mean + a.single_run_sd;
+  return `<div class="rel" style="margin-top:12px"><b>If you ran it once</b> — each
+      run scored as a whole annotator against ${esc(primary)}</div>
+    <div class="runline">
+      <span class="maj" style="left:${x(maj)}%" title="majority vote: ${pc2(maj)}%"></span>
+      ${dots}
+    </div>
+    <div class="runaxis"><span>${pc2(lo - pad)}%</span><span>${pc2(hi + pad)}%</span></div>
+    <table style="margin-top:8px">
+      <tbody>
+        <tr><td>one run (mean of ${runs.length} runs)</td>
+          <td><b>${pc2(a.single_run_mean)}%</b> ± ${(100 * a.single_run_sd).toFixed(2)}</td>
+          <td class="ci">range ${pc2(a.single_run_min)}–${pc2(a.single_run_max)}%${
+            a.single_draw_sd == null ? "" : `, analytic sd ${
+            (100 * a.single_draw_sd).toFixed(2)}`}</td></tr>
+        <tr><td>majority vote over all samples</td>
+          <td><b>${pc2(maj)}%</b></td>
+          <td class="ci">κ=${a.kappa.toFixed(3)}${beaten
+            ? ` — beaten by ${beaten} of the ${runs.length} single runs` : ""}</td></tr>
+        <tr><td>every sample pooled</td>
+          <td>${pc2(a.single_sample_agreement)}%</td>
+          <td class="ci">${a.n_samples} samples, weighted by sample count</td></tr>
+      </tbody>
+    </table>
+    <div class="runvals">per run: ${runs.map(r =>
+      `<code title="${r.n} presentations">${pc2(r.agreement)}</code>`).join(" ")}${
+      (a.single_runs_partial || []).length
+        ? `<span class="ci"> · ${a.single_runs_partial.length} tail replicate(s)
+           omitted (n=${a.single_runs_partial.map(r => r.n).join(", ")}), too few
+           presentations to score as a run</span>` : ""}</div>
+    <div class="method"><p>Run-to-run noise is <b>±${
+      (100 * a.single_run_sd).toFixed(2)}pp</b>, while majority voting moves the
+      figure by <b>${(100 * (maj - a.single_run_mean)).toFixed(2)}pp</b> relative
+      to the average run${within ? " — inside one standard deviation, so the two"
+      + " are statistically indistinguishable" : ""}. Voting stabilises <i>which label</i>
+      you get, but it does not move agreement with ${esc(primary)}.</p></div>`;
+}
+
+function renderSampleLevel(j, perJudge, primary, others) {
+  const panels = others.map(m => {
+    const a = (j.agreement || {})[m];
+    if (!a || !a.by_confidence) return "";
+    const bc = a.by_confidence;
+    const nTot = BUCKETS.reduce((s, [k]) => s + ((bc[k] || {}).n || 0), 0);
+    if (!nTot) return "";
+
+    const bar = BUCKETS.map(([k, label]) => {
+      const n = (bc[k] || {}).n || 0;
+      if (!n) return "";
+      const w = 100 * n / nTot;
+      return `<span class="b-${k}" style="width:${w}%" title="${esc(label)}: ${n}">${
+        w > 7 ? w.toFixed(0) + "%" : ""}</span>`;
+    }).join("");
+    const legend = BUCKETS.map(([k, label]) => {
+      const n = (bc[k] || {}).n || 0;
+      return `<div><i class="b-${k}"></i>${esc(label)} —
+        <b>${n}</b> (${(100 * n / nTot).toFixed(1)}%)</div>`;
+    }).join("");
+
+    const runs = renderRuns(a, primary);
+
+    // Same denominator per row, so a pp gap converts to a comparison count by
+    // multiplying: that is what makes the cancellation between rows legible.
+    const rows = BUCKETS.map(([k, label]) => {
+      const v = bc[k];
+      if (!v) return "";
+      const d = v.maj_hits - v.single_expected;
+      return `<tr>
+        <td>${esc(label)}</td>
+        <td>${v.n}</td>
+        <td>${pc2(v.agreement)}%</td>
+        <td>${pc2(v.single)}%</td>
+        <td class="${d > 0.5 ? "up" : d < -0.5 ? "down" : ""}">${
+          d > 0 ? "+" : ""}${(100 * d / v.n).toFixed(1)}pp<span class="cnt"> ${
+          d > 0 ? "+" : ""}${d.toFixed(0)} cmp</span></td>
+      </tr>`;
+    }).join("");
+
+    const hasMaj = ["unanimous", "strong"].map(k => bc[k]).filter(Boolean);
+    const hm = hasMaj.reduce((acc, v) => ({
+      n: acc.n + v.n, maj: acc.maj + v.maj_hits, exp: acc.exp + v.single_expected,
+    }), { n: 0, maj: 0, exp: 0 });
+    const totals = `<tr style="font-weight:600">
+      <td>where a majority exists</td><td>${hm.n}</td>
+      <td>${pc2(hm.maj / hm.n)}%</td><td>${pc2(hm.exp / hm.n)}%</td>
+      <td class="up">+${(100 * (hm.maj - hm.exp) / hm.n).toFixed(1)}pp<span
+        class="cnt"> +${(hm.maj - hm.exp).toFixed(0)} cmp</span></td></tr>`;
+
+    const split = bc.split;
+    return `<div class="rel" style="margin-top:6px">judge <b>${esc(m)}</b>,
+        ${a.n_samples} samples over ${nTot} presentations${a.self_agreement == null ? ""
+        : ` · self-agreement <b>${pc2(a.self_agreement)}%</b> (two samples of the
+            same presentation — the noise ceiling)`}</div>
+      ${runs}
+      <div class="dist">${bar}</div>
+      <div class="legend">${legend}</div>
+      <table>
+        <thead><tr><th>how unanimous its own samples were</th><th>n</th>
+          <th>majority vs ${esc(short(primary))}</th><th>single sample</th>
+          <th>voting buys</th></tr></thead>
+        <tbody>${rows}${hm.n ? totals : ""}</tbody>
+      </table>
+      <div class="method">
+        <p><b>Single sample</b> is the mean per-presentation match rate — what one
+          run of this judge would agree with. <b>Majority</b> votes its samples
+          first. Both sit on the same denominator, so the last column also reads
+          as a count of comparisons.</p>
+        ${split ? `<p><b>Read the rows, not the total.</b> Voting gains
+          ${(100 * (hm.maj - hm.exp) / hm.n).toFixed(1)}pp wherever a majority
+          exists, then loses it all on the ${split.n} split presentations: with no
+          majority the vote is recorded as the literal label <code>tie</code>,
+          which matches ${esc(primary)} only when it also said tie
+          (${pc(j.tie_rate_judge)}% of the time), so agreement there collapses to
+          ${pc2(split.agreement)}%. The two effects nearly cancel, which is why the
+          pooled single and majority rates look identical
+          (${pc2(a.single_sample_agreement)}% vs ${pc2(a.raw_agreement)}%).</p>` : ""}
+        <p><b>What this decides:</b> the top row is the cleanest evidence. There
+          this judge has no noise left to remove and still agrees only
+          ${pc2((bc.unanimous || {}).agreement)}% of the time, so the gap to
+          ${esc(primary)} is a systematic difference of opinion rather than
+          sampling noise — running it more times cannot close it.</p>
+      </div>`;
+  }).filter(Boolean).join("");
+  if (!panels) return "";
+  return `<section>
+    <p class="level">Level 4 · per sample</p>
+    <h2>Is the disagreement noise, or opinion?</h2>
+    ${panels}
+  </section>`;
+}
+
+// ---- the primary judge's own reliability checks ------------------------------
+function renderReliability(j, primary) {
+  const sc = j.self_consistency;
+  const pb = j.position_bias;
+  const posRow = j.flip_rate == null
+    ? `<tr><td>position bias</td><td colspan="2" class="na">not measured — run
+         <code>--stage submit --swap</code></td></tr>`
+    : `<tr>
+         <td>flip rate (verdict changed when A/B swapped)</td>
+         <td>${pc(j.flip_rate)}%</td>
+         <td class="ci">n=${j.flip_n} paired comparisons</td>
+       </tr>` + (pb ? `<tr>
+         <td>chose the first-shown selection</td>
+         <td>${pc(pb.a_preference)}%<span class="ci"> [${pc(pb.ci_low)}, ${
+           pc(pb.ci_high)}]</span></td>
+         <td class="ci">${pb.unbiased
+           ? "50% inside the interval → no detectable position bias"
+           : "50% outside the interval → position bias present"}</td>
+       </tr>` : "");
+  const extra = [
+    j.tie_rate_judge == null ? "" : `<tr><td>own tie rate</td>
+      <td>${pc(j.tie_rate_judge)}%</td><td class="ci">${j.n_judged} judged</td></tr>`,
+    j.both_bad_rate == null ? "" : `<tr><td>both selections implausible</td>
+      <td>${pc(j.both_bad_rate)}%</td><td class="ci">neither system convinced it</td></tr>`,
+    `<tr><td>intransitive triads</td><td>${(j.intransitive_triads || []).length}</td>
+      <td class="ci">A&gt;B&gt;C&gt;A cycles in the win matrix</td></tr>`,
+    sc ? `<tr><td>self-consistency</td><td>${pc(sc.rate)}%</td>
+      <td class="ci">${sc.identical}/${sc.n} re-scored identically</td></tr>` : "",
+  ].join("");
+  return `<section>
+    <p class="level">Level 5 · the primary judge alone</p>
+    <h2>Reliability of ${esc(primary)}</h2>
+    <div class="rel"><b>${j.n_judged}</b> comparisons judged, <b>${j.n_resolved}</b>
+      resolved without a call</div>
+    <table>
+      <thead><tr><th>check</th><th>value</th><th></th></tr></thead>
+      <tbody>${posRow}${extra}</tbody>
+    </table>
+    <div class="method">
+      <p><b>Rate intervals:</b> ${esc((j.ci_method || {}).rates || "")}</p>
+      <p><b>Bradley–Terry interval:</b> ${esc((j.ci_method || {}).bt || "")}</p>
+    </div>
+  </section>`;
+}
+
+// ---- shared: per-system rates + win matrix for ONE judge ---------------------
+// Rows are ordered by BT share so each table reads as a ranking rather than as
+// configuration order.
+function judgeTables(perSystem, matrix) {
+  const rows = Object.entries(perSystem || {})
+    .map(([s, per]) => ({ s, per }))
+    .sort((a, b) => (b.per.bt_winrate || 0) - (a.per.bt_winrate || 0));
+
+  const rateRows = rows.map(({ s, per }) => `<tr>
+      <td>${esc(s)}</td>
+      ${withCi(per.bt_winrate, per.bt_ci_low, per.bt_ci_high)}
+      ${withCi(per.plausible_rate, per.plausible_ci_low, per.plausible_ci_high)}
+      ${withCi(per.minimality_winrate, per.minimality_ci_low, per.minimality_ci_high)}
+    </tr>`).join("");
+
+  const order = rows.map(r => r.s);
+  const mhead = `<th>beats →</th>` + order.map(s => `<th>${esc(short(s))}</th>`).join("");
+  const mrows = order.map(a => {
+    const cells = order.map(b => {
+      if (a === b) return '<td class="diag">·</td>';
+      const c = (matrix || {})[`${a}|${b}`];
+      if (!c) return '<td class="na">—</td>';
+      const cls = c.win_rate > 0.5 ? "win" : "loss";
+      // Absolute counts under the rate, so the reader sees how much evidence
+      // each cell rests on: wins-losses over the decisive comparisons, with
+      // the undecided (tied) ones bracketed.
+      const wins = Math.round(c.win_rate * c.decisive);
+      return `<td class="${cls}">${pc(c.win_rate)}<span class="ci"> ±${
+        pc((c.ci_high - c.ci_low) / 2)}</span><br><span class="cnt">${wins}–${
+        c.decisive - wins}<span class="ci"> [${c.ties}]</span></span></td>`;
+    }).join("");
+    return `<tr><td>${esc(a)}</td>${cells}</tr>`;
+  }).join("");
+
+  return { order, rateRows, mhead, mrows, trials: matrixTrials(matrix, order) };
+}
+
+// Per-judge, because the trial counts differ between judges: the replicated
+// judge votes over many samples per comparison, the API judge runs each once.
+const matrixNote = trials => `<div class="rel">rate over decisive comparisons
+  only (ties excluded); ± is the half-width of the 95% interval. Second line:
+  <b>wins–losses</b> with <b>[undecided]</b> bracketed. ${trials}</div>`;
+
+// Trial counts behind the matrix. Both orderings of a pair are stored (a|b and
+// b|a hold the same n), so count each unordered pair once.
+function matrixTrials(matrix, order) {
+  const seen = new Set();
+  let pairs = 0, n = 0, decisive = 0, ties = 0, lo = Infinity, hi = 0;
+  for (const a of order) for (const b of order) {
+    const key = [a, b].sort().join("|");
+    const c = (matrix || {})[`${a}|${b}`];
+    if (a === b || !c || seen.has(key)) continue;
+    seen.add(key);
+    pairs++; n += c.n; decisive += c.decisive; ties += c.ties;
+    lo = Math.min(lo, c.n); hi = Math.max(hi, c.n);
+  }
+  if (!pairs) return "";
+  return `<b>${n}</b> trials over <b>${pairs}</b> pairs (${decisive} decisive, ${
+    ties} undecided), <b>${lo}–${hi}</b> per pair`;
+}
+
+main();
+</script>
+</body>
+</html>

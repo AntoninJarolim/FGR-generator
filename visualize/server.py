@@ -41,7 +41,7 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
 # Span-extraction performance tables share their data source with the CLI.
 sys.path.insert(0, os.path.join(REPO_ROOT, "eval"))
-from summary_table import build_summary  # noqa: E402
+from summary_table import build_summary, judge_detail  # noqa: E402
 
 
 def record_key(rec):
@@ -356,6 +356,7 @@ class Handler(BaseHTTPRequestHandler):
         "/viz": "index.html",      # data viewer
         "/stats": "stats.html",    # span mismatch statistics
         "/summary": "summary.html",  # span-extraction performance tables
+        "/judges": "judges.html",    # judge-vs-judge comparison
     }
 
     def do_GET(self):
@@ -409,6 +410,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_api_summary(self, params):
         self._json(build_summary(**self._summary_kwargs(params)))
+
+    def route_api_judges(self, params):
+        # The same judge artifact the summary page reads, served on its own so the
+        # judge-comparison page does not have to pull the whole metric tables.
+        d = judge_detail()
+        self._json(d if d else {"error": "no judge artifact yet -- run "
+                                         "eval/judge_preference.py --stage aggregate"})
 
     def route_api_summary_plot(self, params):
         # Self-contained Bokeh HTML (BokehJS inlined) rendered from the same

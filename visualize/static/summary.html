@@ -35,17 +35,7 @@
   td.na { color: var(--muted); }
   .loading { color: var(--muted); padding: 10px 0; }
   .err { color: var(--bad); }
-  .ci { color: var(--muted); font-size: 11.5px; }
-  /* absolute wins-losses under each matrix rate; same scale as the ± span */
-  .cnt { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-  td.diag { color: var(--border); }
-  td.win { background: #eaf3ea; }
-  td.loss { background: #fbecec; }
-  .method { background: #f8f9fb; border-left: 3px solid var(--accent);
-    padding: 10px 12px; margin-top: 14px; font-size: 12.5px; color: #333; }
-  .method b { color: var(--text); }
-  .method p { margin: 0 0 8px; }
-  .method p:last-child { margin-bottom: 0; }
+  /* The judge panels moved to judges.html; what is left here is the pointer. */
   .rel { font-size: 12.5px; color: var(--muted); margin: 2px 0 12px; }
   .rel b { color: var(--text); font-weight: 600; }
   h2.figs-title { font-size: 16px; margin: 30px 0 2px; }
@@ -92,225 +82,24 @@ async function main() {
   }
   noteEl.textContent = data.note;
   content.innerHTML = data.tables.map(t => renderTable(t, data.columns)).join("")
-    + (data.judge ? renderJudge(data.judge) : "");
+    + (data.judge ? judgeLink(data.judge) : "");
 }
 
-// ---- judged-preference panel -------------------------------------------------
-const pc = v => v == null ? "—" : (v * 100).toFixed(1);
-const withCi = (v, lo, hi) => v == null ? '<td class="na">—</td>'
-  : `<td>${pc(v)}<span class="ci"> [${pc(lo)}, ${pc(hi)}]</span></td>`;
-
-// Per-system rates + win matrix for ONE judge. `perSystem` is keyed by canonical
-// system id; rows are ordered by BT share so the table reads as a ranking rather
-// than as configuration order.
-function judgeTables(perSystem, matrix) {
-  const rows = Object.entries(perSystem || {})
-    .map(([s, per]) => ({ s, per }))
-    .sort((a, b) => (b.per.bt_winrate || 0) - (a.per.bt_winrate || 0));
-
-  const rateRows = rows.map(({ s, per }) => `<tr>
-      <td>${esc(s)}</td>
-      ${withCi(per.bt_winrate, per.bt_ci_low, per.bt_ci_high)}
-      ${withCi(per.plausible_rate, per.plausible_ci_low, per.plausible_ci_high)}
-      ${withCi(per.minimality_winrate, per.minimality_ci_low, per.minimality_ci_high)}
-    </tr>`).join("");
-
-  // Win matrix: row beats column, decisive comparisons only.
-  const order = rows.map(r => r.s);
-  const mhead = `<th>beats →</th>` + order.map(s => `<th>${esc(short(s))}</th>`).join("");
-  const mrows = order.map(a => {
-    const cells = order.map(b => {
-      if (a === b) return '<td class="diag">·</td>';
-      const c = (matrix || {})[`${a}|${b}`];
-      if (!c) return '<td class="na">—</td>';
-      const cls = c.win_rate > 0.5 ? "win" : "loss";
-      // Absolute counts under the rate, so the reader sees how much evidence
-      // each cell rests on: wins–losses over the decisive comparisons, with
-      // the undecided (tied) ones bracketed.
-      const wins = Math.round(c.win_rate * c.decisive);
-      return `<td class="${cls}">${pc(c.win_rate)}<span class="ci"> ±${
-        pc((c.ci_high - c.ci_low) / 2)}</span><br><span class="cnt">${wins}–${
-        c.decisive - wins}<span class="ci"> [${c.ties}]</span></span></td>`;
-    }).join("");
-    return `<tr><td>${esc(a)}</td>${cells}</tr>`;
-  }).join("");
-
-  return { order, rateRows, mhead, mrows, trials: matrixTrials(matrix, order) };
-}
-
-const RATE_HEAD = `<thead><tr><th>system</th><th>BT share</th>
-  <th>plausible</th><th>minimality</th></tr></thead>`;
-// Per-judge, because the trial counts differ between judges: the replicated
-// judge votes over many samples per comparison, the API judge runs each once.
-const matrixNote = trials => `<div class="rel">rate over decisive comparisons
-  only (ties excluded); ± is the half-width of the 95% interval. Second line:
-  <b>wins–losses</b> with <b>[undecided]</b> bracketed. ${trials}</div>`;
-
-function renderJudge(j) {
-  const perJudge = j.per_judge || {};
-  const primary = j.judge_model;
-  // Fall back to the subset-keyed runs[] shape for artifacts written before
-  // per-judge blocks existed.
-  const primarySystems = (perJudge[primary] || {}).per_system
-    || Object.fromEntries((j.systems || []).map(s =>
-         [s, firstSubset(j.runs[j.system_ids[s]])]).filter(([, v]) => v));
-  const { rateRows, mhead, mrows, trials } = judgeTables(primarySystems, j.matrix);
-
-  const sc = j.self_consistency;
-  const rel = [
-    `judge <b>${esc(j.judge_model || "?")}</b>`,
-    `<b>${j.n_judged}</b> comparisons judged, <b>${j.n_resolved}</b> resolved without a call`,
-    `judge tie rate <b>${pc(j.tie_rate_judge)}%</b>`,
-    `both-bad <b>${pc(j.both_bad_rate)}%</b>`,
-    `intransitive triads <b>${(j.intransitive_triads || []).length}</b>`,
-    sc ? `self-consistency <b>${pc(sc.rate)}%</b> (${sc.identical}/${sc.n} re-scored)` : null,
-  ].filter(Boolean).join(" · ");
-
-  // Position bias gets its own row: the flip rate says how often a verdict
-  // changed when A and B were swapped, and the A-preference says whether those
-  // changes are noise or a systematic preference for whatever is shown first.
-  const pb = j.position_bias;
-  const posRow = j.flip_rate == null
-    ? `<tr><td>position bias</td><td colspan="2" class="na">not measured — run
-         <code>--stage submit --swap</code></td></tr>`
-    : `<tr>
-         <td>flip rate (verdict changed when A/B swapped)</td>
-         <td>${pc(j.flip_rate)}%</td>
-         <td class="ci">n=${j.flip_n} paired comparisons</td>
-       </tr>` + (pb ? `<tr>
-         <td>chose the first-shown selection</td>
-         <td>${pc(pb.a_preference)}%<span class="ci"> [${pc(pb.ci_low)}, ${
-           pc(pb.ci_high)}]</span></td>
-         <td class="ci">${pb.unbiased
-           ? "50% inside the interval → no detectable position bias"
-           : "50% outside the interval → position bias present"}</td>
-       </tr>` : "");
-
-  const agree = Object.entries(j.agreement || {}).map(([m, a]) =>
-    `<p><b>Agreement with ${esc(m)}:</b> ${pc(a.raw_agreement)}% raw, κ=${
-      a.kappa.toFixed(3)}, on ${a.n} shared comparisons — see its own panel below.</p>`
-    ).join("");
-
-  const others = Object.keys(perJudge).filter(m => m !== primary);
-
+// The judge panels live on their own page now: the judge column below is a single
+// pooled number, whereas judging it needs per-judge matrices, cross-judge
+// agreement and the sample-level breakdown.
+function judgeLink(j) {
+  const others = Object.keys(j.per_judge || {}).filter(m => m !== j.judge_model);
   return `<section>
-    <h2>Judged preference — blind pairwise, all-vs-all</h2>
-    <div class="rel">${rel}</div>
-    <table>
-      ${RATE_HEAD}
-      <tbody>${rateRows}</tbody>
-    </table>
-    <h2 style="margin-top:18px">Reliability</h2>
-    <table>
-      <thead><tr><th>check</th><th>value</th><th></th></tr></thead>
-      <tbody>${posRow}</tbody>
-    </table>
-    <h2 style="margin-top:18px">Win matrix — row beats column</h2>
-    ${matrixNote(trials)}
-    <table>
-      <thead><tr>${mhead}</tr></thead>
-      <tbody>${mrows}</tbody>
-    </table>
-    <div class="method">
-      ${agree}
-      <p><b>Rate intervals (BT share, plausible, minimality, matrix cells):</b>
-        ${esc((j.ci_method||{}).rates || "")}</p>
-      <p><b>Bradley–Terry interval:</b> ${esc((j.ci_method||{}).bt || "")}</p>
-    </div>
-  </section>` + others.map(m => renderSecondJudge(m, perJudge[m],
-                                                    (j.agreement || {})[m], primary)).join("");
-}
-
-// A second judge gets the same tables, plus an annotator comparison against the
-// primary. The two agreement rows are the whole point: "single sample" is what
-// one run of this judge would agree with, "majority vote" is what the vote over
-// all its samples agrees with. If voting does not beat a single sample, the
-// remaining gap is a systematic difference of opinion, not sampling noise.
-function renderSecondJudge(model, block, agree, primary) {
-  if (!block) return "";
-  const { rateRows, mhead, mrows, trials } = judgeTables(block.per_system, block.matrix);
-  const reps = block.mean_replicates;
-  const rel = [
-    `judge <b>${esc(model)}</b>`,
-    `<b>${block.n_judged}</b> comparisons`,
-    reps ? `<b>${reps.toFixed(1)}</b> sample(s) per comparison, majority-voted per field` : null,
-    block.tie_rate_judge != null ? `judge tie rate <b>${pc(block.tie_rate_judge)}%</b>` : null,
-  ].filter(Boolean).join(" · ");
-
-  let agreeTable = "";
-  if (agree) {
-    const conf = Object.entries(agree.by_confidence || {}).map(([k, v]) =>
-      `<tr><td style="padding-left:22px">…where its samples were ${esc(k)}</td>
-        <td>${pc(v.agreement)}%</td><td class="ci">n=${v.n}</td></tr>`).join("");
-    const voteHelps = agree.single_sample_agreement != null
-      && agree.raw_agreement - agree.single_sample_agreement > 0.02;
-    agreeTable = `<h2 style="margin-top:18px">As an annotator vs ${esc(primary)}</h2>
-      <table>
-        <thead><tr><th>mode</th><th>agreement</th><th></th></tr></thead>
-        <tbody>
-          ${agree.single_sample_agreement == null ? "" : `<tr>
-            <td>single sample (run it once)</td>
-            <td>${pc(agree.single_sample_agreement)}%</td>
-            <td class="ci">${agree.n_samples} sample-vs-primary pairs</td></tr>`}
-          <tr><td>majority vote over all samples</td>
-            <td>${pc(agree.raw_agreement)}%</td>
-            <td class="ci">κ=${agree.kappa.toFixed(3)} on ${agree.n} shared comparisons</td></tr>
-          ${agree.self_agreement == null ? "" : `<tr>
-            <td>self-agreement (noise ceiling)</td>
-            <td>${pc(agree.self_agreement)}%</td>
-            <td class="ci">two samples of the same comparison</td></tr>`}
-          ${conf}
-        </tbody>
-      </table>
-      <div class="method"><p>${voteHelps
-        ? "Majority voting beats a single sample, so part of the disagreement is this judge's own sampling noise."
-        : "Majority voting does <b>not</b> beat a single sample: the disagreement survives averaging, so it is a systematic difference of opinion rather than noise. The unanimous row is the cleanest read — even with its noise fully removed, this judge still differs from the primary there."}</p></div>`;
-  }
-
-  return `<section>
-    <h2>Judged preference — second judge</h2>
-    <div class="rel">${rel}</div>
-    <table>
-      ${RATE_HEAD}
-      <tbody>${rateRows}</tbody>
-    </table>
-    <h2 style="margin-top:18px">Win matrix — row beats column</h2>
-    ${matrixNote(trials)}
-    <table>
-      <thead><tr>${mhead}</tr></thead>
-      <tbody>${mrows}</tbody>
-    </table>
-    ${agreeTable}
+    <h2>Judged preference</h2>
+    <div class="rel">the <code>judge</code> column above is a pooled
+      Bradley–Terry share from <b>${esc(j.judge_model || "?")}</b> over
+      <b>${j.n_judged}</b> comparisons${others.length
+        ? `, cross-checked against <b>${others.map(esc).join(", ")}</b>` : ""}.
+      Per-judge win matrices, where the judges disagree, and whether that
+      disagreement is noise or opinion: <a href="judges">judge comparison →</a></div>
   </section>`;
 }
-
-// Trial counts behind the matrix. Both orderings of a pair are stored (a|b and
-// b|a hold the same n), so count each unordered pair once.
-function matrixTrials(matrix, order) {
-  const seen = new Set();
-  let pairs = 0, n = 0, decisive = 0, ties = 0, lo = Infinity, hi = 0;
-  for (const a of order) for (const b of order) {
-    const key = [a, b].sort().join("|");
-    const c = matrix[`${a}|${b}`];
-    if (a === b || !c || seen.has(key)) continue;
-    seen.add(key);
-    pairs++; n += c.n; decisive += c.decisive; ties += c.ties;
-    lo = Math.min(lo, c.n); hi = Math.max(hi, c.n);
-  }
-  if (!pairs) return "";
-  return `<b>${n}</b> trials over <b>${pairs}</b> pairs (${decisive} decisive, ${
-    ties} undecided), <b>${lo}–${hi}</b> per pair`;
-}
-
-// runs[] is keyed by subset but the judge fit is pooled, so every subset holds
-// the same values; take whichever is present.
-function firstSubset(bySubset) {
-  if (!bySubset) return null;
-  const k = Object.keys(bySubset)[0];
-  return k ? bySubset[k] : null;
-}
-const short = s => s.replace("gemma31B-", "g31-").replace("-unc", "-u")
-  .replace("-con", "-c").replace("-reas", "-r");
 
 function renderTable(table, columns) {
   const head = `<th>system</th>` + columns.map(c => `<th>${esc(c)}</th>`).join("");
