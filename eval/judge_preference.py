@@ -354,7 +354,7 @@ def stage_submit(args):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     with open(os.path.join(args.work, f"{tag}.batch.json"), "w") as f:
         json.dump({"id": batch.id, "n": len(reqs), "swap": args.swap,
-                   "created": time.time()}, f)
+                   "seed": args.seed, "created": time.time()}, f)
     print(f"submitted batch {batch.id} ({len(reqs)} requests) status={batch.processing_status}")
 
 
@@ -686,9 +686,14 @@ def stage_aggregate(args):
     # (pair, item, order), and re-scoring the same comparison twice would
     # double-count it. Dedupe within each judge -- never across judges, whose
     # verdicts are separate measurements and are compared, not pooled.
+    # Orientation is keyed on system_a -- who ACTUALLY sat in slot A -- not on
+    # the `swapped` flag. The flag only inverts a deterministic per-(pair,item)
+    # coin flip seeded by --seed, so two runs with the same flag share a slot
+    # order only while the seed is unchanged. system_a is the observed fact and
+    # needs no such assumption. (Today both agree on every record.)
     def vkey(r):
         return (r.get("judge", MODEL), tuple(r["pair"]), tuple(r["item"]),
-                r.get("swapped", False))
+                r.get("system_a") or r.get("swapped", False))
     # Every run writes a resolved.jsonl for its own item set, so the same
     # structural fact (both-empty, or byte-identical selections) is recorded once
     # per run. Those are properties of the systems, not observations, and
@@ -785,7 +790,7 @@ def stage_aggregate(args):
     by_key = defaultdict(list)
     for v in verdicts:
         by_key[(tuple(v["pair"]), tuple(v["item"]))].append(v)
-    both = [g for g in by_key.values() if len({x["swapped"] for x in g}) == 2]
+    both = [g for g in by_key.values() if len({x.get("system_a") for x in g}) == 2]
     flips = sum(1 for g in both
                 if {x["overall_winner"] for x in g} != {g[0]["overall_winner"]})
     flip_rate = flips / len(both) if both else None
@@ -915,11 +920,11 @@ def stage_aggregate(args):
     # ---- cross-judge agreement on the comparisons both judged
     agreement = {}
     for other in [j for j in by_judge if j != primary]:
-        pk = {(tuple(v["pair"]), tuple(v["item"]), v.get("swapped", False)): v
+        pk = {(tuple(v["pair"]), tuple(v["item"]), v.get("system_a")): v
               for v in by_judge[primary]}
         both = [(pk[k], o) for o in by_judge[other]
                 if (k := (tuple(o["pair"]), tuple(o["item"]),
-                          o.get("swapped", False))) in pk]
+                          o.get("system_a"))) in pk]
         if not both:
             continue
         same = sum(1 for a, b in both if a["overall_winner"] == b["overall_winner"])
@@ -968,7 +973,8 @@ def stage_aggregate(args):
         var_p = 0.0
         for prim, o in both:
             labs = samples.get((other, tuple(o["pair"]), tuple(o["item"]),
-                                o.get("swapped", False)), [o["overall_winner"]])
+                                o.get("system_a") or o.get("swapped", False)),
+                               [o["overall_winner"]])
             gold = prim["overall_winner"]
             match = sum(1 for l in labs if l == gold)
             hits += match
