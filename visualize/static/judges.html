@@ -481,21 +481,28 @@ function renderLogitLevel(j, primary) {
                 ? " — this judge leans to the SECOND slot" : ""}</td></tr>
           <tr><td>slot preference β, bounded scale</td>
             <td>${d.beta_mean == null ? "—" : d.beta_mean.toFixed(3)} nats</td>
-            <td class="ci">symmetric part ½(m<sub>A</sub>+m<sub>B</sub>), clipped at ±${
-              d.clip}</td></tr>
+            <td class="ci">symmetric part ½(m<sub>i</sub>+m<sub>j</sub>) — the
+              slot preference, clipped at ±${d.clip}</td></tr>
           <tr><td>signal |Δ|, same scale</td>
             <td>${d.signal_abs_mean == null ? "—" : d.signal_abs_mean.toFixed(3)} nats</td>
-            <td class="ci">antisymmetric part ½(m<sub>A</sub>−m<sub>B</sub>) — what
+            <td class="ci">antisymmetric part ½(m<sub>i</sub>−m<sub>j</sub>) — what
               survives after the slot preference cancels</td></tr>
         </tbody>
       </table>
       <div class="method">
-        <p><b>Why pooling both orders is the fix.</b> Write the slot-space margin
-          m = log p(a) − log p(b) and model it additively as m = ±Δ + β, with the
-          sign set by which system sat in slot A. The two orders then give
-          Δ̂ = ½(m<sub>A</sub> − m<sub>B</sub>) with β cancelled exactly, and
-          β̂ = ½(m<sub>A</sub> + m<sub>B</sub>) as a by-product. Every comparison
-          here was run in both orders, so this is available for all of them.</p>
+        <p><b>Why pooling both orders is the fix.</b> For one presentation the
+          <i>slot-space margin</i> is m = log p(a) − log p(b), where a and b name
+          slots, not systems. Call the two systems i and j, and write
+          <b>m<sub>i</sub></b> for the margin observed when <b>i sat in slot A</b>
+          and <b>m<sub>j</sub></b> for the margin when <b>j sat in slot A</b>.
+          Swapping flips which system slot A holds — so it flips the sign of the
+          system part Δ — but slot A is still slot A, so the slot part β is
+          unchanged: m<sub>i</sub> = +Δ + β and m<sub>j</sub> = −Δ + β. Δ is
+          antisymmetric under the swap and β is symmetric, so the two orders
+          identify both: <b>Δ̂ = ½(m<sub>i</sub> − m<sub>j</sub>)</b>, positive
+          meaning i is preferred, and <b>β̂ = ½(m<sub>i</sub> + m<sub>j</sub>)</b>.
+          Every comparison here was run in both orders, so this is available for
+          all of them.</p>
         <p><b>Why log-odds and not a vote.</b> m is a <i>conditional</i> log-odds
           of a against b — the tie mass divides out of p(a)/p(b) — so it stays
           informative exactly where a vote is stuck. τ bounds the influence of a

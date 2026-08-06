@@ -500,18 +500,43 @@ def logit_labels(verdicts, clip=MARGIN_CLIP):
 
     The design is a balanced paired swap: every (pair, item) is judged once with
     each system in slot A, so with margins de-anonymised into system space an
-    additive slot preference cancels in the mean. Concretely, writing the
-    slot-space margin m = log p(a) - log p(b) and modelling it as
-    m = +Delta + beta when the first system is in slot A and m = -Delta + beta
-    when it is in slot B, the two orders give
+    additive slot preference cancels in the mean.
 
-        Delta_hat = (m_A - m_B) / 2      the signal, slot preference removed
-        beta_hat  = (m_A + m_B) / 2      the slot preference itself
+    Notation. For one presentation the SLOT-SPACE margin is
 
-    which is the Davidson-Beaver multiplicative order effect written additively
-    on the log-odds scale. m is a CONDITIONAL log-odds of a vs b: the tie mass
-    divides out of p(a)/p(b), which is exactly what is wanted when the task is to
-    lean a forced tie toward one side.
+        m = log p(a) - log p(b)
+
+    where a and b name SLOTS, not systems. Fix the pair as (i, j) = pair[0],
+    pair[1] and subscript m by which of the two occupied slot A:
+
+        m_i  -- the margin observed when i sat in slot A (j in slot B)
+        m_j  -- the margin observed when j sat in slot A (i in slot B)
+
+    Model each as a system part plus a slot part. Swapping flips which system
+    slot A holds, so it flips the sign of the system part, while slot A remains
+    slot A and the slot part is untouched:
+
+        m_i = +Delta + beta
+        m_j = -Delta + beta
+
+    Delta is antisymmetric under the swap, beta is symmetric, so two orders
+    identify both:
+
+        Delta_hat = (m_i - m_j) / 2   the signal, POSITIVE MEANS i (= pair[0])
+                                      is preferred; slot preference removed
+        beta_hat  = (m_i + m_j) / 2   the slot preference itself
+
+    This is the Davidson-Beaver multiplicative within-pair order effect written
+    additively on the log-odds scale. Equivalently, and this is what the label
+    methods below compute: record for every presentation the margin FOR i
+    (d = m if i sat in slot A, else d = -m) and average d over both orders -- the
+    beta terms cancel because each order is equally represented, leaving Delta.
+    De-anonymising is what supplies the minus sign that does the cancelling;
+    averaging raw m instead estimates beta and destroys Delta.
+
+    m is a CONDITIONAL log-odds of a vs b: the tie mass divides out of
+    p(a)/p(b), which is exactly what is wanted when the task is to lean a forced
+    tie toward one side.
     """
     comp = defaultdict(list)                 # (pair,item) -> [(margin_for_pair0, lp, slotA_is_pair0)]
     for v in verdicts:
@@ -556,13 +581,18 @@ def logit_labels(verdicts, clip=MARGIN_CLIP):
             acc[p1 if f0 else p0] += e["b"] / z
             acc["tie"] += e.get("tie", 0.0) / z
         by_method["mean_prob"][key] = max(acc, key=acc.get)
-        # diagnostics: split the clipped slot-space margin into signal and bias
-        A = [max(-clip, min(clip, lp["a"] - lp["b"])) for _, lp, f0 in rows if f0]
-        B = [max(-clip, min(clip, lp["a"] - lp["b"])) for _, lp, f0 in rows if not f0]
-        if A and B:
-            mA, mB = sum(A) / len(A), sum(B) / len(B)
-            anti.append((mA - mB) / 2)
-            sym.append((mA + mB) / 2)
+        # diagnostics: split the clipped slot-space margin into signal and bias.
+        # i_first / j_first hold m for the presentations where pair[0] resp.
+        # pair[1] occupied slot A -- the m_i / m_j of the docstring.
+        i_first = [max(-clip, min(clip, lp["a"] - lp["b"]))
+                   for _, lp, f0 in rows if f0]
+        j_first = [max(-clip, min(clip, lp["a"] - lp["b"]))
+                   for _, lp, f0 in rows if not f0]
+        if i_first and j_first:
+            m_i = sum(i_first) / len(i_first)
+            m_j = sum(j_first) / len(j_first)
+            anti.append((m_i - m_j) / 2)      # Delta, positive favours pair[0]
+            sym.append((m_i + m_j) / 2)       # beta, the slot preference
         for _, lp, _ in rows:
             top = max(lp, key=lp.get)
             if top in ("a", "b"):
