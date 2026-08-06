@@ -132,6 +132,7 @@ async function main() {
     renderMatrixLevel(j, perJudge, primary, others),
     renderVerdictLevel(j, primary, others),
     renderSampleLevel(j, perJudge, primary, others),
+    renderLogitLevel(j, primary),
     renderReliability(j, primary),
   ].join("");
 }
@@ -424,6 +425,88 @@ function renderSampleLevel(j, perJudge, primary, others) {
   return `<section>
     <p class="level">Level 4 · per sample</p>
     <h2>Is the disagreement noise, or opinion?</h2>
+    ${panels}
+  </section>`;
+}
+
+// ---- level 4b: aggregating from the answer-token distribution ----------------
+// The sampled label throws away everything the judge's answer-token distribution
+// knows. Counting samples can only ever return k/n, so an even split has to be
+// recorded as a tie -- a label the primary judge almost never emits. Aggregating
+// the distributions instead pools both presentation orders into one signed score,
+// which is decisive by construction.
+const METHOD_LABEL = {
+  current_per_orientation: "sampled majority, per order (current)",
+  pooled_majority: "sampled majority, both orders pooled",
+  mean_prob: "mean probability (balanced position calibration)",
+  mean_logodds: "mean log-odds, unbounded",
+  mean_logodds_clipped: "mean log-odds, hard-clipped",
+  mean_tanh: "mean tanh(log-odds / τ)",
+};
+
+function renderLogitLevel(j, primary) {
+  const lm = j.logit_methods || {};
+  const panels = Object.entries(lm).map(([judge, blk]) => {
+    const d = blk.diagnostics || {};
+    const rec = blk.recommended;
+    const rows = (blk.methods || []).map(m => {
+      const best = m.method === rec;
+      return `<tr${best ? ' style="font-weight:600"' : ""}>
+        <td>${esc(METHOD_LABEL[m.method] || m.method)}${
+          best ? ' <span class="ci">← recommended</span>' : ""}</td>
+        <td>${pc2(m.agreement)}%</td>
+        <td class="${m.tie_rate > 0.1 ? "down" : ""}">${pc2(m.tie_rate)}%</td>
+      </tr>`;
+    }).join("");
+    const slot = d.first_slot_rate;
+    return `<div class="rel" style="margin-top:6px">judge <b>${esc(judge)}</b> ·
+        <b>${d.n_comparisons}</b> comparisons × <b>${
+        (d.mean_samples || 0).toFixed(0)}</b> samples (both orders)</div>
+      <table>
+        <thead><tr><th>aggregation</th><th>agrees with ${esc(short(primary))}</th>
+          <th>ties emitted</th></tr></thead>
+        <tbody>${rows}
+          <tr><td class="ci">${esc(primary)}'s own tie rate</td>
+            <td class="ci">—</td><td class="ci">${pc2(blk.primary_tie_rate)}%</td></tr>
+        </tbody>
+      </table>
+      <table style="margin-top:14px">
+        <thead><tr><th>slot-preference diagnostic</th><th>value</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>chose the first-shown slot</td>
+            <td class="${slot != null && Math.abs(slot - 0.5) > 0.02 ? "down" : ""}">${
+              pc2(slot)}%</td>
+            <td class="ci">${d.n_decisive_samples} decisive samples; 50% = no
+              preference${slot != null && slot < 0.5
+                ? " — this judge leans to the SECOND slot" : ""}</td></tr>
+          <tr><td>slot preference β, bounded scale</td>
+            <td>${d.beta_mean == null ? "—" : d.beta_mean.toFixed(3)} nats</td>
+            <td class="ci">symmetric part ½(m<sub>A</sub>+m<sub>B</sub>), clipped at ±${
+              d.clip}</td></tr>
+          <tr><td>signal |Δ|, same scale</td>
+            <td>${d.signal_abs_mean == null ? "—" : d.signal_abs_mean.toFixed(3)} nats</td>
+            <td class="ci">antisymmetric part ½(m<sub>A</sub>−m<sub>B</sub>) — what
+              survives after the slot preference cancels</td></tr>
+        </tbody>
+      </table>
+      <div class="method">
+        <p><b>Why pooling both orders is the fix.</b> Write the slot-space margin
+          m = log p(a) − log p(b) and model it additively as m = ±Δ + β, with the
+          sign set by which system sat in slot A. The two orders then give
+          Δ̂ = ½(m<sub>A</sub> − m<sub>B</sub>) with β cancelled exactly, and
+          β̂ = ½(m<sub>A</sub> + m<sub>B</sub>) as a by-product. Every comparison
+          here was run in both orders, so this is available for all of them.</p>
+        <p><b>Why log-odds and not a vote.</b> m is a <i>conditional</i> log-odds
+          of a against b — the tie mass divides out of p(a)/p(b) — so it stays
+          informative exactly where a vote is stuck. τ bounds the influence of a
+          saturated tail while staying strictly monotone, so a near-one-hot sample
+          is damped but never has its sign discarded.</p>
+      </div>`;
+  }).join("");
+  if (!panels) return "";
+  return `<section>
+    <p class="level">Level 4b · per answer-token distribution</p>
+    <h2>Aggregating from logits instead of counting votes</h2>
     ${panels}
   </section>`;
 }

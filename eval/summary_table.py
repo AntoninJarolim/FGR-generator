@@ -104,6 +104,7 @@ def judge_detail():
         # One block per judge (matrix + per-system rates + BT), so a second
         # judge run renders its own table instead of only an agreement number.
         "per_judge": d.get("per_judge", {}),
+        "logit_methods": d.get("logit_methods") or {},
         "judges": d.get("judges", {}),
         "runs": d.get("runs", {}),
         "intransitive_triads": d.get("intransitive_triads", []),

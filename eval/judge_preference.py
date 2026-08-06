@@ -484,6 +484,109 @@ def bootstrap_bt(pool, systems, reps=400, seed=0):
     return {s: (pct(v, 2.5), pct(v, 97.5)) for s, v in draws.items()}
 
 
+#: Margins beyond this (nats) are treated as saturated. The judge's answer token
+#: is near one-hot -- median per-sample |log p(a) - log p(b)| is ~30 nats, i.e.
+#: p(loser) ~ 1e-13 -- and softmax tails that deep are not calibrated. Clipping
+#: keeps a single saturated sample from dominating an average, without discarding
+#: its sign.
+MARGIN_CLIP = 5.0
+
+
+def logit_labels(verdicts, clip=MARGIN_CLIP):
+    """Aggregate a replicated judge from its answer-token distributions.
+
+    Returns ``(by_method, diag)``. Each method maps (pair, item) -> winning
+    system (or "tie"), pooling BOTH presentation orders and all replicates.
+
+    The design is a balanced paired swap: every (pair, item) is judged once with
+    each system in slot A, so with margins de-anonymised into system space an
+    additive slot preference cancels in the mean. Concretely, writing the
+    slot-space margin m = log p(a) - log p(b) and modelling it as
+    m = +Delta + beta when the first system is in slot A and m = -Delta + beta
+    when it is in slot B, the two orders give
+
+        Delta_hat = (m_A - m_B) / 2      the signal, slot preference removed
+        beta_hat  = (m_A + m_B) / 2      the slot preference itself
+
+    which is the Davidson-Beaver multiplicative order effect written additively
+    on the log-odds scale. m is a CONDITIONAL log-odds of a vs b: the tie mass
+    divides out of p(a)/p(b), which is exactly what is wanted when the task is to
+    lean a forced tie toward one side.
+    """
+    comp = defaultdict(list)                 # (pair,item) -> [(margin_for_pair0, lp, slotA_is_pair0)]
+    for v in verdicts:
+        d = (v.get("dist") or {}).get("overall")
+        if not d or "logprobs" not in d:
+            continue
+        lp = d["logprobs"]
+        if "a" not in lp or "b" not in lp:
+            continue
+        first_is_p0 = v.get("system_a") == v["pair"][0]
+        m = lp["a"] - lp["b"]
+        comp[(tuple(v["pair"]), tuple(v["item"]))].append(
+            (m if first_is_p0 else -m, lp, first_is_p0))
+    by_method = {k: {} for k in ("pooled_majority", "mean_logodds",
+                                 "mean_logodds_clipped", "mean_tanh", "mean_prob")}
+    sym, anti, first_wins, n_dec = [], [], 0, 0
+    for key, rows in comp.items():
+        p0, p1 = key[0]
+        labs = []
+        for m, lp, f0 in rows:
+            top = max(lp, key=lp.get)
+            labs.append("tie" if top == "tie" else
+                        (p0 if (top == "a") == f0 else p1))
+        c = Counter(labs).most_common()
+        by_method["pooled_majority"][key] = ("tie" if len(c) > 1 and c[0][1] == c[1][1]
+                                             else c[0][0])
+        mo = sum(m for m, _, _ in rows) / len(rows)
+        by_method["mean_logodds"][key] = p0 if mo > 0 else p1 if mo < 0 else "tie"
+        mc = sum(max(-clip, min(clip, m)) for m, _, _ in rows) / len(rows)
+        by_method["mean_logodds_clipped"][key] = p0 if mc > 0 else p1 if mc < 0 else "tie"
+        # Hard clipping bounds the influence of a saturated tail but makes two
+        # saturated orders cancel to exactly zero, manufacturing a fresh tie.
+        # tanh is bounded AND strictly monotone, so it damps the tail without
+        # ever discarding its sign.
+        mt = sum(math.tanh(m / clip) for m, _, _ in rows) / len(rows)
+        by_method["mean_tanh"][key] = p0 if mt > 0 else p1 if mt < 0 else "tie"
+        acc = {p0: 0.0, p1: 0.0, "tie": 0.0}
+        for m, lp, f0 in rows:
+            e = {k: math.exp(x) for k, x in lp.items()}
+            z = sum(e.values()) or 1.0
+            acc[p0 if f0 else p1] += e["a"] / z
+            acc[p1 if f0 else p0] += e["b"] / z
+            acc["tie"] += e.get("tie", 0.0) / z
+        by_method["mean_prob"][key] = max(acc, key=acc.get)
+        # diagnostics: split the clipped slot-space margin into signal and bias
+        A = [max(-clip, min(clip, lp["a"] - lp["b"])) for _, lp, f0 in rows if f0]
+        B = [max(-clip, min(clip, lp["a"] - lp["b"])) for _, lp, f0 in rows if not f0]
+        if A and B:
+            mA, mB = sum(A) / len(A), sum(B) / len(B)
+            anti.append((mA - mB) / 2)
+            sym.append((mA + mB) / 2)
+        for _, lp, _ in rows:
+            top = max(lp, key=lp.get)
+            if top in ("a", "b"):
+                n_dec += 1
+                first_wins += (top == "a")
+    diag = {
+        "n_comparisons": len(comp),
+        "mean_samples": (sum(len(r) for r in comp.values()) / len(comp)) if comp else 0,
+        "clip": clip,
+        "beta_mean": (sum(sym) / len(sym)) if sym else None,
+        "beta_median": median(sym) if sym else None,
+        "signal_abs_mean": (sum(abs(x) for x in anti) / len(anti)) if anti else None,
+        "first_slot_rate": (first_wins / n_dec) if n_dec else None,
+        "n_decisive_samples": n_dec,
+    }
+    return by_method, diag
+
+
+def median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return None if not n else (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2)
+
+
 def judge_block(verdicts, resolved_ties, systems, reps, seed):
     """Matrix + plausibility + minimality + BT for ONE judge's verdicts.
 
@@ -996,6 +1099,68 @@ def stage_aggregate(args):
                "minimality_ci_high": mi_hi, "minimality_n": mn,
                "minimality_ties": mt}
         runs[canon_id.get(s, s)] = {sub: per for sub in SUBSETS}   # pooled fit
+    # ---- logit aggregation for any judge that recorded answer-token distributions
+    # Scored against the primary judge's label, which is the only external
+    # reference available: the point of the exercise is that the sampled-majority
+    # rule manufactures ties the primary judge almost never emits.
+    logit_methods = None
+    lp_judges = sorted({r.get("judge", MODEL) for r in raw
+                        if (r.get("dist") or {}).get("overall", {}).get("logprobs")})
+    if lp_judges:
+        prim_lab = {}
+        for v in by_judge.get(primary, []):
+            prim_lab.setdefault((tuple(v["pair"]), tuple(v["item"])), []).append(
+                v["overall_winner"])
+        prim_lab = {k: Counter(v).most_common(1)[0][0] for k, v in prim_lab.items()}
+        logit_methods = {}
+        for jm in lp_judges:
+            vs = [r for r in raw if r.get("judge", MODEL) == jm
+                  and tuple(r["item"]) in canon]
+            by_method, diag = logit_labels(vs)
+            # the sampled-majority rule as it stands today, per presentation, so
+            # the comparison is against what the pipeline actually does
+            cur = defaultdict(lambda: defaultdict(list))
+            for r in vs:
+                cur[(tuple(r["pair"]), tuple(r["item"]))][
+                    r.get("system_a")].append(r["overall_winner"])
+            def _vote(l):
+                c = Counter(l).most_common()
+                return "tie" if len(c) > 1 and c[0][1] == c[1][1] else c[0][0]
+            by_method["current_per_orientation"] = {
+                k: _vote([_vote(v) for v in slots.values()]) for k, slots in cur.items()}
+            shared = [k for k in by_method["mean_logodds"] if k in prim_lab]
+            rows = []
+            for name, lab in by_method.items():
+                n = len(shared)
+                rows.append({
+                    "method": name,
+                    "n": n,
+                    "agreement": (sum(1 for k in shared if lab[k] == prim_lab[k]) / n
+                                  if n else None),
+                    "tie_rate": (sum(1 for k in shared if lab[k] == "tie") / n
+                                 if n else None),
+                })
+            rows.sort(key=lambda r: -(r["agreement"] or 0))
+            logit_methods[jm] = {
+                "diagnostics": diag, "methods": rows,
+                "primary": primary,
+                "primary_tie_rate": (sum(1 for k in shared if prim_lab[k] == "tie")
+                                     / len(shared)) if shared else None,
+                "recommended": "mean_tanh",
+            }
+            d = diag
+            print(f"\n=== {jm}: logit aggregation over {d['n_comparisons']} comparisons "
+                  f"({d['mean_samples']:.1f} samples each, both orders) ===")
+            print(f"  slot-A win rate {100*d['first_slot_rate']:5.2f}% of "
+                  f"{d['n_decisive_samples']} decisive samples (50% = no slot preference)")
+            print(f"  clipped(+-{d['clip']:.0f}) slot preference beta = "
+                  f"{d['beta_mean']:+.3f} nats, |signal| = {d['signal_abs_mean']:.3f} nats")
+            for r in rows:
+                print(f"    {r['method']:26s} agrees {100*r['agreement']:5.2f}% with "
+                      f"{primary}   emits tie {100*r['tie_rate']:5.2f}%")
+            print(f"    {'(' + primary + ' own tie rate)':26s} "
+                  f"{100*logit_methods[jm]['primary_tie_rate']:33.2f}%")
+
     res_ties = [r for r in resolved if r.get("winner") == "tie"]
     per_judge = {}
     for jm, vs in by_judge.items():
@@ -1012,6 +1177,7 @@ def stage_aggregate(args):
 
     data = {"judge_model": primary, "effort": EFFORT, "thinking": THINKING["type"],
             "per_judge": per_judge,
+            "logit_methods": logit_methods,
             "n_judged": len(verdicts), "n_resolved": len(resolved),
             "judges": {j: len(v) for j, v in by_judge.items()},
             "agreement": agreement,
