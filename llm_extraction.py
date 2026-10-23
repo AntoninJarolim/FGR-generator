@@ -111,7 +111,8 @@ class VLLMGenerator:
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
                  psg_key='passage', constrained=False, reasoning_parser=None,
-                 thinking_token_budget=None, enable_thinking=False):
+                 thinking_token_budget=None, enable_thinking=False,
+                 large_doc_grammar=True):
 
         # Validated here rather than at first use: loading the weights first
         # would burn minutes only to reject the flags afterwards.
@@ -169,15 +170,24 @@ class VLLMGenerator:
             # that backend="auto" would run (and fail) on every 250KB grammar.
             from vllm.config import StructuredOutputsConfig
             llm_kwargs['structured_outputs_config'] = StructuredOutputsConfig(backend='guidance')
-            # llguidance's default parser limits reject substring grammars over
-            # ~200KB documents. vLLM offers no way to pass LLParserLimits, so we
-            # wrap LLMatcher construction (see _patch_llguidance_limits) -- and
-            # grammar compilation must therefore run in THIS process, not a
-            # spawned EngineCore child, hence in-process engine mode.
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            _patch_llguidance_limits()
-            print("Enabled per-document span-grammar constrained decoding "
-                  "(llguidance substring, backend=guidance, raised parser limits).")
+            if large_doc_grammar:
+                # llguidance's default parser limits reject substring grammars over
+                # ~200KB documents. vLLM offers no way to pass LLParserLimits, so we
+                # wrap LLMatcher construction (see _patch_llguidance_limits) -- and
+                # grammar compilation must therefore run in THIS process, not a
+                # spawned EngineCore child, hence in-process engine mode.
+                os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+                _patch_llguidance_limits()
+                print("Enabled per-document span-grammar constrained decoding "
+                      "(llguidance substring, backend=guidance, raised parser limits).")
+            else:
+                # Short passages compile well inside llguidance's default limits,
+                # so neither the patch nor the in-process engine it requires is
+                # needed -- and the multiprocess engine is faster, which matters
+                # across hundreds of thousands of samples.
+                print("Enabled per-document span-grammar constrained decoding "
+                      "(llguidance substring, backend=guidance, default parser "
+                      "limits, multiprocess engine).")
         self.llm = LLM(
             model=model_name,
             dtype=dtype,
@@ -1094,7 +1104,15 @@ def get_args():
                         help="skip re-generating samples whose extracted spans are not found "
                              "in the source text (still marks them with extraction_error)")
     parser.add_argument("--force_rewrite", action="store_true",
-                        help="Disables the check for generating into existing directory.")
+                        help="Disables the check for generating into existing directory. "
+                             "This is also how a run RESUMES: the row ids already present "
+                             "in the output dir are skipped instead of regenerated.")
+    parser.add_argument("--skip_output", action='store_true',
+                        help="Generate only; do not write data/extracted_relevancy. Use "
+                             "for sharded jobs sharing a --run_tag dir, which would "
+                             "otherwise all truncate and rewrite the same output file "
+                             "concurrently. Aggregate afterwards with --skip_generation "
+                             "over the full range.")
 
     # Data args
     parser.add_argument('--input_data_name', type=str, required=True,
@@ -1115,6 +1133,13 @@ def get_args():
                              "--constrained).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
+    parser.add_argument('--run_tag', type=str, default=None,
+                        help="Name the output subdirectory '<model>_<TAG>' instead of "
+                             "'<model>_from<A>-to<B>'. Give every shard of one dataset "
+                             "the same tag and they all generate into ONE directory, so "
+                             "get_all_responses aggregates them with no merge step and "
+                             "each shard resumes over what the others already did. "
+                             "Pair with --skip_output on the shards.")
 
     # Generation setting args
     parser.add_argument("--model_name",
@@ -1179,6 +1204,19 @@ def get_args():
                         help="Pass enable_thinking=True to the chat template. Needed for "
                              "models whose template disables reasoning by default (gemma-4 "
                              "pre-closes an empty thought channel); harmless elsewhere.")
+    parser.add_argument('--large_doc_grammar', dest='large_doc_grammar',
+                        action='store_true', default=True,
+                        help="Raise llguidance's parser limits and run the vLLM engine "
+                             "in-process, so --constrained can compile substring grammars "
+                             "for documents beyond ~200KB (needed for LongEmbed). On by "
+                             "default; the patch only takes effect in the process that "
+                             "compiles grammars, hence the in-process engine.")
+    parser.add_argument('--no_large_doc_grammar', dest='large_doc_grammar',
+                        action='store_false',
+                        help="Use llguidance's default limits and vLLM's faster "
+                             "multiprocess engine. Correct for short passages and worth "
+                             "it at scale; a long document would fail grammar compilation "
+                             "with 'initial lexer configuration (grammar) too big'.")
 
     return parser.parse_args()
 
@@ -1201,6 +1239,7 @@ def main():
                 reasoning_parser=args.reasoning_parser,
                 thinking_token_budget=args.thinking_token_budget,
                 enable_thinking=args.enable_thinking,
+                large_doc_grammar=args.large_doc_grammar,
             )
         else:
             generation_api = OpenAIGenerator(
@@ -1239,11 +1278,17 @@ def main():
     if args.reasoning_parser:
         mode_dir = f"{mode_dir}-reasoning"
     model_name = sanitize_model_name(args.model_name)
-    # "to" is the END INDEX of the slice, not its length: a shard covering
-    # 100000..110000 must be named _from100000-to110000, not _from100000-to10000.
-    # Identical to the old naming for every from_sample=0 run, so existing
-    # LongEmbed output dirs (and their resume state) are unaffected.
-    batch_dir = f"{model_name}_from{args.from_sample}-to{args.from_sample + len(input_data)}"
+    if args.run_tag:
+        # Range-free name so every shard of a dataset lands in ONE directory:
+        # generation writes range-stamped batch files (no collisions), and a later
+        # pass over the full range aggregates all of them at once.
+        batch_dir = f"{model_name}_{args.run_tag}"
+    else:
+        # "to" is the END INDEX of the slice, not its length: a shard covering
+        # 100000..110000 must be named _from100000-to110000, not _from100000-to10000.
+        # Identical to the old naming for every from_sample=0 run, so existing
+        # LongEmbed output dirs (and their resume state) are unaffected.
+        batch_dir = f"{model_name}_from{args.from_sample}-to{args.from_sample + len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
@@ -1256,6 +1301,17 @@ def main():
                              args.generation_client,
                              template
                              )
+
+    if args.skip_output:
+        # Concurrent shards sharing a --run_tag dir must not each truncate and
+        # rewrite the one extracted file. Stop after generation; a single later
+        # pass over the full range turns every shard's batch files into the
+        # dataset.
+        print(f"--skip_output: generation finished, batch files are in "
+              f"{generated_data_dir}. Aggregate them with:\n"
+              f"  --skip_generation --skip-regeneration --run_tag {args.run_tag} "
+              f"--from_sample 0 --to_sample <total>")
+        return
 
     responses_out = get_all_responses(generated_data_dir)
 
