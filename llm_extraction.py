@@ -15,6 +15,7 @@ from vllm import LLM, SamplingParams
 
 from explainable_dataset import ExplanationsDataset
 from custom_utils.longembed import is_longembed, load_longembed
+from custom_utils.msmarco import is_msmarco, load_msmarco
 
 
 
@@ -710,12 +711,13 @@ def sleep_with_progress(seconds, description=None):
 def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_config=None):
     """Load input records, deciding the source from ``input_name``.
 
-    A ``.json``/``.jsonl`` path is read from disk; the LongEmbed dataset gets its
-    dedicated query/passage join; anything else is treated as a HuggingFace
-    dataset id loaded with ``datasets.load_dataset``.
+    A ``.json``/``.jsonl`` path is read from disk; the LongEmbed and MS MARCO
+    dataset ids get their dedicated query/passage joins; anything else is treated
+    as a HuggingFace dataset id loaded with ``datasets.load_dataset``.
 
-    The FILE checks come first so that a dataset materialized to disk is read as
-    a file even when its path happens to contain a dataset name.
+    The FILE checks come first on purpose: the materialized MS MARCO pairs live at
+    ``data/msmarco/pairs-train.jsonl``, whose path contains "msmarco", so a
+    name-based check running first would send the file to the HF loader.
 
     ``to_sample < 0`` means "to the end of the data" for every source. Only the
     LongEmbed branch used to honour that, which left the ``.jsonl`` path
@@ -726,7 +728,7 @@ def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_con
 
     if input_name.endswith('.jsonl'):
         # Stop reading at ``end`` rather than parsing the whole file: a shard of
-        # a large pairs file should not pay for the lines after it.
+        # a 532k-line MS MARCO pairs file should not pay for the lines after it.
         records = []
         with jsonlines.open(input_name, 'r') as f:
             for line_id, line_obj in enumerate(f):
@@ -741,6 +743,9 @@ def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_con
             return data[from_sample:end]
     elif is_longembed(input_name):
         records = load_longembed()
+        return records[from_sample:end]
+    elif is_msmarco(input_name):
+        records = load_msmarco()
         return records[from_sample:end]
     else:
         from datasets import load_dataset
@@ -1269,10 +1274,15 @@ def main():
     #   * reasoning  -- --reasoning_parser appends "-reasoning" so the thinking
     #                   and non-thinking arms stay comparable side by side
     #                   instead of overwriting each other.
-    # Span grammar only applies to the XML span format, so the dirs produced are
-    # long-embed-json, long-embed-xml, long-embed-xml-constrained and
-    # long-embed-xml-constrained-reasoning -- never a filename suffix. (There is
-    # deliberately no JSON-constrained mode.)
+    # Span grammar only applies to the XML span format, so the dirs produced per
+    # template base are e.g. long-embed-json, long-embed-xml,
+    # long-embed-xml-constrained and long-embed-xml-constrained-reasoning --
+    # never a filename suffix. (There is deliberately no JSON-constrained mode.)
+    #
+    # The template basename therefore also names the DATASET in practice, which
+    # is why MS MARCO gets its own ms-marco-xml template pair -- byte-identical
+    # to long-embed-xml, but keeping the two datasets' outputs (and their resume
+    # state, keyed on this dir) apart.
     template_name = os.path.basename(template_base_path(args.template_file))
     mode_dir = f"{template_name}-constrained" if args.constrained else template_name
     if args.reasoning_parser:
