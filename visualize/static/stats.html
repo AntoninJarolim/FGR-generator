@@ -24,6 +24,9 @@
   header h1 { font-size: 15px; margin: 0; }
   main { max-width: 900px; margin: 0 auto; padding: 20px 16px; }
   .note { color: var(--muted); font-size: 12.5px; margin: 4px 0 22px; }
+  /* sample counts beside each outcome percentage, and that table's caption */
+  td .sub { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .sub-note { margin: 18px 0 8px; }
   section { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px 16px; margin-bottom: 22px; }
   section h2 { margin: 0 0 2px; font-size: 15px; word-break: break-all; }
   section .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
@@ -118,7 +121,39 @@ function renderTable(groups) {
       <th># samples</th><th># no spans</th>
     </tr></thead>
     <tbody>${rows}</tbody>
-  </table>`;
+  </table>` + renderOutcomes(groups);
+}
+
+// Sample-level outcome, next to the span-level rates above. The two answer
+// different questions: the rates say what share of spans matched, this says what
+// happened to the SAMPLE once the not-found spans are dropped -- which is what
+// the retrieval metrics and the judge actually score.
+const OUTCOMES = [
+  ["all_em", "used as generated", "every span verbatim — the located span IS the generated one"],
+  ["located", "repaired", "all spans survive, but at least one needed normalization or ≤5% edits"],
+  ["partial", "partly lost", "located some spans, dropped at least one as not-found"],
+  ["all_nf", "nothing found", "no span could be located; the sample ends up empty"],
+];
+
+function renderOutcomes(groups) {
+  if (!groups.some(g => g.sample_rates)) return "";     // pre-v4 cached stats
+  const rows = groups.map(g => {
+    const r = g.sample_rates, c = g.samples || {};
+    if (!r) return "";
+    return `<tr><td>${esc(g.group)}</td>${OUTCOMES.map(([k]) =>
+      `<td>${(r[k] * 100).toFixed(1)}<span class="sub"> ${fmt(c[k])}</span></td>`
+    ).join("")}<td>${fmt(g.n_nospan)}</td></tr>`;
+  }).join("");
+  return `<div class="note sub-note">Sample outcome after locating — mutually
+      exclusive, over the samples that had spans:
+      ${OUTCOMES.map(([, name, why]) => `<b>${name}</b> (${why})`).join(", ")}.
+      Percentages with the sample count beside them. “Partly lost” and “nothing
+      found” are where a downstream metric scores less than the model emitted.</div>
+    <table>
+      <thead><tr><th>group</th>${OUTCOMES.map(([, name]) =>
+        `<th>${name}</th>`).join("")}<th># no spans</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 
 main();

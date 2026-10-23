@@ -53,7 +53,7 @@ from custom_utils.span_match import (  # noqa: F401  (re-exported)
 
 # Bump when classification/aggregation semantics change: cached stats sidecars
 # with a different version are recomputed instead of served.
-STATS_VERSION = 3
+STATS_VERSION = 4
 
 
 class _NormCache:
@@ -123,8 +123,22 @@ def compute_stats(path):
             passage = rec.get("passage") or rec.get("clean_text") or ""
             key = rec.get("doc_id") or rec.get("document_id"), rec.get("subset")
             tiers = classify_spans(passage, spans, lambda: cache.get(key, passage))
+            # Sample-level outcome, alongside the span-level rates. What survives
+            # locating is what the judge and the retrieval metrics actually see
+            # (eval/heuristic_spans.py drops 'nf'), so the question "is this
+            # sample used as generated, repaired, or gutted?" is answered here and
+            # not by any span-level average:
+            #   all_em    -- every located span IS the generated span
+            #   located   -- all spans survive, but >=1 needed normalization/approx
+            #   partial   -- some spans located, >=1 dropped as not-found
+            #   all_nf    -- nothing located; the sample ends up with no spans
+            n_nf = tiers.count("nf")
+            bucket = ("all_nf" if n_nf == len(tiers) else
+                      "partial" if n_nf else
+                      "all_em" if tiers.count("em") == len(tiers) else "located")
             for a in accs:
                 a["n"] += 1
+                a[bucket] += 1
                 for tier in ("em", "norm", "approx"):
                     a[tier] += tiers.count(tier) / len(tiers)
     rows = []
@@ -137,12 +151,22 @@ def compute_stats(path):
             "approx": a["approx"] / n_spanned if n_spanned else None,
             "n": a["n"],
             "n_nospan": a["n_nospan"],
+            # Sample counts, and their share of the samples that had spans. The
+            # four are mutually exclusive and sum to n_spanned.
+            "samples": {k: a[k] for k in SAMPLE_BUCKETS},
+            "sample_rates": ({k: a[k] / n_spanned for k in SAMPLE_BUCKETS}
+                             if n_spanned else None),
         })
     return rows
 
 
+#: Sample-level outcome buckets, mutually exclusive; see compute_stats.
+SAMPLE_BUCKETS = ("all_em", "located", "partial", "all_nf")
+
+
 def _new_acc():
-    return {"n": 0, "n_nospan": 0, "em": 0.0, "norm": 0.0, "approx": 0.0}
+    return dict({"n": 0, "n_nospan": 0, "em": 0.0, "norm": 0.0, "approx": 0.0},
+                **{k: 0 for k in SAMPLE_BUCKETS})
 
 
 # --------------------------- CLI ---------------------------
@@ -202,6 +226,23 @@ def print_table(rows):
         cum_approx = None if cum_norm is None else cum_norm + approx
         print(f"{g['group']:16s} {pc(em)} {pc(norm)} {pc(approx)} "
               f"{pc(cum_norm)} {pc(cum_approx):>7s} {g['n']:9,} {g['n_nospan']:10,}")
+
+    # Sample-level outcome: what a downstream metric actually gets to score,
+    # since locating drops the not-found spans.
+    if not any(g.get("sample_rates") for g in rows):
+        return
+    print()
+    header = (f"{'group':16s} {'as generated':>13s} {'located':>13s} "
+              f"{'partly lost':>13s} {'nothing found':>14s} {'no spans':>10s}")
+    print(header)
+    print("-" * len(header))
+    for g in rows:
+        r, c = g.get("sample_rates"), g.get("samples") or {}
+        if not r:
+            continue
+        cell = lambda k: f"{r[k] * 100:5.1f}% {c[k]:6,}"
+        print(f"{g['group']:16s} {cell('all_em'):>13s} {cell('located'):>13s} "
+              f"{cell('partial'):>13s} {cell('all_nf'):>14s} {g['n_nospan']:10,}")
 
 
 def main():

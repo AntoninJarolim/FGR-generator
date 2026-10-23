@@ -15,6 +15,7 @@ from vllm import LLM, SamplingParams
 
 from explainable_dataset import ExplanationsDataset
 from custom_utils.longembed import is_longembed, load_longembed
+from custom_utils.msmarco import is_msmarco, load_msmarco
 
 
 
@@ -111,7 +112,8 @@ class VLLMGenerator:
     def __init__(self, model_name, max_model_len=None, gpu_memory_utilization=0.9,
                  tensor_parallel_size=None, dtype='auto', max_gen_tokens=2**16,
                  psg_key='passage', constrained=False, reasoning_parser=None,
-                 thinking_token_budget=None, enable_thinking=False):
+                 thinking_token_budget=None, enable_thinking=False,
+                 large_doc_grammar=True):
 
         # Validated here rather than at first use: loading the weights first
         # would burn minutes only to reject the flags afterwards.
@@ -125,6 +127,13 @@ class VLLMGenerator:
                     f"--thinking_token_budget ({thinking_token_budget}) must leave room "
                     f"for the spans inside --max_gen_tokens ({max_gen_tokens}); "
                     f"constrained outputs are small (~100 tokens) but not free.")
+
+        # fit_prompt gives the passage whatever is left of the context after the
+        # generation budget and TRUNC_MARGIN. If that is <= 0 it truncates EVERY
+        # passage to the empty string and reports no error -- and a constrained
+        # run then builds its span grammar from "", so every sample comes back
+        # with zero spans. Fail loudly instead.
+        self._check_context_budget(max_model_len, max_gen_tokens, "--vllm_max_model_len")
 
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
@@ -162,15 +171,24 @@ class VLLMGenerator:
             # that backend="auto" would run (and fail) on every 250KB grammar.
             from vllm.config import StructuredOutputsConfig
             llm_kwargs['structured_outputs_config'] = StructuredOutputsConfig(backend='guidance')
-            # llguidance's default parser limits reject substring grammars over
-            # ~200KB documents. vLLM offers no way to pass LLParserLimits, so we
-            # wrap LLMatcher construction (see _patch_llguidance_limits) -- and
-            # grammar compilation must therefore run in THIS process, not a
-            # spawned EngineCore child, hence in-process engine mode.
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            _patch_llguidance_limits()
-            print("Enabled per-document span-grammar constrained decoding "
-                  "(llguidance substring, backend=guidance, raised parser limits).")
+            if large_doc_grammar:
+                # llguidance's default parser limits reject substring grammars over
+                # ~200KB documents. vLLM offers no way to pass LLParserLimits, so we
+                # wrap LLMatcher construction (see _patch_llguidance_limits) -- and
+                # grammar compilation must therefore run in THIS process, not a
+                # spawned EngineCore child, hence in-process engine mode.
+                os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+                _patch_llguidance_limits()
+                print("Enabled per-document span-grammar constrained decoding "
+                      "(llguidance substring, backend=guidance, raised parser limits).")
+            else:
+                # Short passages compile well inside llguidance's default limits,
+                # so neither the patch nor the in-process engine it requires is
+                # needed -- and the multiprocess engine is faster, which matters
+                # across hundreds of thousands of samples.
+                print("Enabled per-document span-grammar constrained decoding "
+                      "(llguidance substring, backend=guidance, default parser "
+                      "limits, multiprocess engine).")
         self.llm = LLM(
             model=model_name,
             dtype=dtype,
@@ -184,6 +202,11 @@ class VLLMGenerator:
         # targets the real limit rather than our request.
         self.max_model_len = self._resolve_max_model_len(max_model_len)
         print(f"Effective max_model_len for prompt fitting: {self.max_model_len}")
+        # Re-check against what the engine actually settled on: it can cap the
+        # requested context to what fits in the KV cache, which can turn a
+        # healthy budget into a negative one.
+        self._check_context_budget(self.max_model_len, max_gen_tokens,
+                                   "effective max_model_len")
 
         # temperature=0 => greedy (deterministic) decoding.
         sampling_kwargs = dict(
@@ -194,6 +217,25 @@ class VLLMGenerator:
             sampling_kwargs['thinking_token_budget'] = thinking_token_budget
         sampling_kwargs.update(self._reasoning_sampling_kwargs())
         self.sampling_params = SamplingParams(**sampling_kwargs)
+
+    @classmethod
+    def _check_context_budget(cls, max_model_len, max_gen_tokens, source):
+        """Reject a context that leaves no room for the passage.
+
+        ``fit_prompt`` computes the passage budget as
+        ``max_model_len - max_gen_tokens - TRUNC_MARGIN``; at or below zero it
+        keeps zero passage tokens, silently, for every sample.
+        """
+        if not max_model_len:
+            return
+        budget = max_model_len - max_gen_tokens - cls.TRUNC_MARGIN
+        if budget <= 0:
+            raise ValueError(
+                f"{source} ({max_model_len}) leaves no room for the prompt: "
+                f"{max_model_len} - --max_gen_tokens ({max_gen_tokens}) - "
+                f"TRUNC_MARGIN ({cls.TRUNC_MARGIN}) = {budget}. Every passage would be "
+                f"truncated to the empty string and every sample would return no spans. "
+                f"Raise the context or lower --max_gen_tokens.")
 
     def _reasoning_sampling_kwargs(self):
         """Sampling kwargs the reasoning arm needs on EVERY request.
@@ -667,30 +709,49 @@ def sleep_with_progress(seconds, description=None):
 
 
 def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_config=None):
-    """Load input records, deciding the source from ``input_name``:
-    the LongEmbed dataset gets its dedicated query/passage join, a
-    ``.json``/``.jsonl`` path is read from disk, and anything else is treated as
-    a HuggingFace dataset id loaded with ``datasets.load_dataset``."""
-    if is_longembed(input_name):
-        records = load_longembed()
-        end = to_sample if to_sample >= 0 else len(records)
-        return records[from_sample:end]
-    elif input_name.endswith('.jsonl'):
+    """Load input records, deciding the source from ``input_name``.
+
+    A ``.json``/``.jsonl`` path is read from disk; the LongEmbed and MS MARCO
+    dataset ids get their dedicated query/passage joins; anything else is treated
+    as a HuggingFace dataset id loaded with ``datasets.load_dataset``.
+
+    The FILE checks come first on purpose: the materialized MS MARCO pairs live at
+    ``data/msmarco/pairs-train.jsonl``, whose path contains "msmarco", so a
+    name-based check running first would send the file to the HF loader.
+
+    ``to_sample < 0`` means "to the end of the data" for every source. Only the
+    LongEmbed branch used to honour that, which left the ``.jsonl`` path
+    returning ZERO records (``from_sample <= line_id < -1`` is never true) and
+    the HuggingFace path silently dropping the last record.
+    """
+    end = to_sample if to_sample >= 0 else None
+
+    if input_name.endswith('.jsonl'):
+        # Stop reading at ``end`` rather than parsing the whole file: a shard of
+        # a 532k-line MS MARCO pairs file should not pay for the lines after it.
+        records = []
         with jsonlines.open(input_name, 'r') as f:
-            return [
-                line_obj
-                for line_id, line_obj in enumerate(f)
-                if from_sample <= line_id < to_sample
-            ]
+            for line_id, line_obj in enumerate(f):
+                if end is not None and line_id >= end:
+                    break
+                if line_id >= from_sample:
+                    records.append(line_obj)
+        return records
     elif input_name.endswith('.json'):
         with open(input_name, 'r') as f:
             data = json.load(f)
-            return data[from_sample:to_sample]
+            return data[from_sample:end]
+    elif is_longembed(input_name):
+        records = load_longembed()
+        return records[from_sample:end]
+    elif is_msmarco(input_name):
+        records = load_msmarco()
+        return records[from_sample:end]
     else:
         from datasets import load_dataset
         dataset = load_dataset(input_name, hf_config, split=hf_split)
         records = [dict(row) for row in dataset]
-        return records[from_sample:to_sample]
+        return records[from_sample:end]
 
 
 def silent_remove(output_data_file):
@@ -876,15 +937,38 @@ def generate_all_batches_fix(data_chunks, generation_api, generated_data_dir, ge
 
 
 def write_output(responses_out, output_data_file, input_data, from_sample):
+    """Pair each response with its input record and write the extracted dataset.
+
+    Rows are emitted in ROW-ID order, so the output follows input order however
+    the batch files happened to be produced.
+
+    Responses whose row id falls outside the loaded slice are skipped rather than
+    indexing off the end of ``input_data`` -- note a negative index would not
+    raise, it would silently pair spans with the WRONG record. This happens
+    whenever several jobs share one generation dir: only a pass that loaded the
+    FULL range can pair them all. The skip count is reported so a silently
+    partial file is impossible to miss.
+    """
     silent_remove(output_data_file)
+    n_written = n_out_of_range = 0
     with jsonlines.open(output_data_file, mode='w') as writer:
-        for in_key, out_selected in responses_out.items():
+        for in_key in sorted(responses_out):
+            index = in_key - from_sample
+            if not 0 <= index < len(input_data):
+                n_out_of_range += 1
+                continue
             writer.write(
                 {
-                    **input_data[in_key - from_sample],
-                    'selected_spans': out_selected.get('spans', [])
+                    **input_data[index],
+                    'selected_spans': responses_out[in_key].get('spans', [])
                 }
             )
+            n_written += 1
+    print(f"Wrote {n_written} rows to {output_data_file}")
+    if n_out_of_range:
+        print(f"Skipped {n_out_of_range} generated rows outside the loaded range "
+              f"[{from_sample}, {from_sample + len(input_data)}). Re-run with "
+              f"--skip_generation over the full range to pair every shard.")
 
 
 def read_out_data(output_data_file):
@@ -1025,7 +1109,15 @@ def get_args():
                         help="skip re-generating samples whose extracted spans are not found "
                              "in the source text (still marks them with extraction_error)")
     parser.add_argument("--force_rewrite", action="store_true",
-                        help="Disables the check for generating into existing directory.")
+                        help="Disables the check for generating into existing directory. "
+                             "This is also how a run RESUMES: the row ids already present "
+                             "in the output dir are skipped instead of regenerated.")
+    parser.add_argument("--skip_output", action='store_true',
+                        help="Generate only; do not write data/extracted_relevancy. Use "
+                             "for sharded jobs sharing a --run_tag dir, which would "
+                             "otherwise all truncate and rewrite the same output file "
+                             "concurrently. Aggregate afterwards with --skip_generation "
+                             "over the full range.")
 
     # Data args
     parser.add_argument('--input_data_name', type=str, required=True,
@@ -1046,6 +1138,13 @@ def get_args():
                              "--constrained).")
     parser.add_argument('--psg_key', type=str, default='psg_text',
                         help="Key for the passage text in the input data.")
+    parser.add_argument('--run_tag', type=str, default=None,
+                        help="Name the output subdirectory '<model>_<TAG>' instead of "
+                             "'<model>_from<A>-to<B>'. Give every shard of one dataset "
+                             "the same tag and they all generate into ONE directory, so "
+                             "get_all_responses aggregates them with no merge step and "
+                             "each shard resumes over what the others already did. "
+                             "Pair with --skip_output on the shards.")
 
     # Generation setting args
     parser.add_argument("--model_name",
@@ -1110,6 +1209,19 @@ def get_args():
                         help="Pass enable_thinking=True to the chat template. Needed for "
                              "models whose template disables reasoning by default (gemma-4 "
                              "pre-closes an empty thought channel); harmless elsewhere.")
+    parser.add_argument('--large_doc_grammar', dest='large_doc_grammar',
+                        action='store_true', default=True,
+                        help="Raise llguidance's parser limits and run the vLLM engine "
+                             "in-process, so --constrained can compile substring grammars "
+                             "for documents beyond ~200KB (needed for LongEmbed). On by "
+                             "default; the patch only takes effect in the process that "
+                             "compiles grammars, hence the in-process engine.")
+    parser.add_argument('--no_large_doc_grammar', dest='large_doc_grammar',
+                        action='store_false',
+                        help="Use llguidance's default limits and vLLM's faster "
+                             "multiprocess engine. Correct for short passages and worth "
+                             "it at scale; a long document would fail grammar compilation "
+                             "with 'initial lexer configuration (grammar) too big'.")
 
     return parser.parse_args()
 
@@ -1132,6 +1244,7 @@ def main():
                 reasoning_parser=args.reasoning_parser,
                 thinking_token_budget=args.thinking_token_budget,
                 enable_thinking=args.enable_thinking,
+                large_doc_grammar=args.large_doc_grammar,
             )
         else:
             generation_api = OpenAIGenerator(
@@ -1161,16 +1274,31 @@ def main():
     #   * reasoning  -- --reasoning_parser appends "-reasoning" so the thinking
     #                   and non-thinking arms stay comparable side by side
     #                   instead of overwriting each other.
-    # Span grammar only applies to the XML span format, so the dirs produced are
-    # long-embed-json, long-embed-xml, long-embed-xml-constrained and
-    # long-embed-xml-constrained-reasoning -- never a filename suffix. (There is
-    # deliberately no JSON-constrained mode.)
+    # Span grammar only applies to the XML span format, so the dirs produced per
+    # template base are e.g. long-embed-json, long-embed-xml,
+    # long-embed-xml-constrained and long-embed-xml-constrained-reasoning --
+    # never a filename suffix. (There is deliberately no JSON-constrained mode.)
+    #
+    # The template basename therefore also names the DATASET in practice, which
+    # is why MS MARCO gets its own ms-marco-xml template pair -- byte-identical
+    # to long-embed-xml, but keeping the two datasets' outputs (and their resume
+    # state, keyed on this dir) apart.
     template_name = os.path.basename(template_base_path(args.template_file))
     mode_dir = f"{template_name}-constrained" if args.constrained else template_name
     if args.reasoning_parser:
         mode_dir = f"{mode_dir}-reasoning"
     model_name = sanitize_model_name(args.model_name)
-    batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
+    if args.run_tag:
+        # Range-free name so every shard of a dataset lands in ONE directory:
+        # generation writes range-stamped batch files (no collisions), and a later
+        # pass over the full range aggregates all of them at once.
+        batch_dir = f"{model_name}_{args.run_tag}"
+    else:
+        # "to" is the END INDEX of the slice, not its length: a shard covering
+        # 100000..110000 must be named _from100000-to110000, not _from100000-to10000.
+        # Identical to the old naming for every from_sample=0 run, so existing
+        # LongEmbed output dirs (and their resume state) are unaffected.
+        batch_dir = f"{model_name}_from{args.from_sample}-to{args.from_sample + len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
@@ -1183,6 +1311,17 @@ def main():
                              args.generation_client,
                              template
                              )
+
+    if args.skip_output:
+        # Concurrent shards sharing a --run_tag dir must not each truncate and
+        # rewrite the one extracted file. Stop after generation; a single later
+        # pass over the full range turns every shard's batch files into the
+        # dataset.
+        print(f"--skip_output: generation finished, batch files are in "
+              f"{generated_data_dir}. Aggregate them with:\n"
+              f"  --skip_generation --skip-regeneration --run_tag {args.run_tag} "
+              f"--from_sample 0 --to_sample <total>")
+        return
 
     responses_out = get_all_responses(generated_data_dir)
 

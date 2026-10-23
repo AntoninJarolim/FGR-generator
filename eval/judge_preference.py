@@ -54,7 +54,7 @@ import os
 import random
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
@@ -354,7 +354,7 @@ def stage_submit(args):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     with open(os.path.join(args.work, f"{tag}.batch.json"), "w") as f:
         json.dump({"id": batch.id, "n": len(reqs), "swap": args.swap,
-                   "created": time.time()}, f)
+                   "seed": args.seed, "created": time.time()}, f)
     print(f"submitted batch {batch.id} ({len(reqs)} requests) status={batch.processing_status}")
 
 
@@ -484,6 +484,223 @@ def bootstrap_bt(pool, systems, reps=400, seed=0):
     return {s: (pct(v, 2.5), pct(v, 97.5)) for s, v in draws.items()}
 
 
+#: Margins beyond this (nats) are treated as saturated. The judge's answer token
+#: is near one-hot -- median per-sample |log p(a) - log p(b)| is ~30 nats, i.e.
+#: p(loser) ~ 1e-13 -- and softmax tails that deep are not calibrated. Clipping
+#: keeps a single saturated sample from dominating an average, without discarding
+#: its sign.
+MARGIN_CLIP = 5.0
+
+
+def logit_labels(verdicts, clip=MARGIN_CLIP):
+    """Aggregate a replicated judge from its answer-token distributions.
+
+    Returns ``(by_method, diag)``. Each method maps (pair, item) -> winning
+    system (or "tie"), pooling BOTH presentation orders and all replicates.
+
+    The design is a balanced paired swap: every (pair, item) is judged once with
+    each system in slot A, so with margins de-anonymised into system space an
+    additive slot preference cancels in the mean.
+
+    Notation. For one presentation the SLOT-SPACE margin is
+
+        m = log p(a) - log p(b)
+
+    where a and b name SLOTS, not systems. Fix the pair as (i, j) = pair[0],
+    pair[1] and subscript m by which of the two occupied slot A:
+
+        m_i  -- the margin observed when i sat in slot A (j in slot B)
+        m_j  -- the margin observed when j sat in slot A (i in slot B)
+
+    Model each as a system part plus a slot part. Swapping flips which system
+    slot A holds, so it flips the sign of the system part, while slot A remains
+    slot A and the slot part is untouched:
+
+        m_i = +Delta + beta
+        m_j = -Delta + beta
+
+    Delta is antisymmetric under the swap, beta is symmetric, so two orders
+    identify both:
+
+        Delta_hat = (m_i - m_j) / 2   the signal, POSITIVE MEANS i (= pair[0])
+                                      is preferred; slot preference removed
+        beta_hat  = (m_i + m_j) / 2   the slot preference itself
+
+    This is the Davidson-Beaver multiplicative within-pair order effect written
+    additively on the log-odds scale. Equivalently, and this is what the label
+    methods below compute: record for every presentation the margin FOR i
+    (d = m if i sat in slot A, else d = -m) and average d over both orders -- the
+    beta terms cancel because each order is equally represented, leaving Delta.
+    De-anonymising is what supplies the minus sign that does the cancelling;
+    averaging raw m instead estimates beta and destroys Delta.
+
+    m is a CONDITIONAL log-odds of a vs b: the tie mass divides out of
+    p(a)/p(b), which is exactly what is wanted when the task is to lean a forced
+    tie toward one side.
+    """
+    comp = defaultdict(list)                 # (pair,item) -> [(margin_for_pair0, lp, slotA_is_pair0)]
+    for v in verdicts:
+        d = (v.get("dist") or {}).get("overall")
+        if not d or "logprobs" not in d:
+            continue
+        lp = d["logprobs"]
+        if "a" not in lp or "b" not in lp:
+            continue
+        first_is_p0 = v.get("system_a") == v["pair"][0]
+        m = lp["a"] - lp["b"]
+        comp[(tuple(v["pair"]), tuple(v["item"]))].append(
+            (m if first_is_p0 else -m, lp, first_is_p0))
+    by_method = {k: {} for k in ("pooled_majority", "mean_logodds",
+                                 "mean_logodds_clipped", "mean_tanh", "mean_prob")}
+    sym, anti, first_wins, n_dec = [], [], 0, 0
+    for key, rows in comp.items():
+        p0, p1 = key[0]
+        labs = []
+        for m, lp, f0 in rows:
+            top = max(lp, key=lp.get)
+            labs.append("tie" if top == "tie" else
+                        (p0 if (top == "a") == f0 else p1))
+        c = Counter(labs).most_common()
+        by_method["pooled_majority"][key] = ("tie" if len(c) > 1 and c[0][1] == c[1][1]
+                                             else c[0][0])
+        mo = sum(m for m, _, _ in rows) / len(rows)
+        by_method["mean_logodds"][key] = p0 if mo > 0 else p1 if mo < 0 else "tie"
+        mc = sum(max(-clip, min(clip, m)) for m, _, _ in rows) / len(rows)
+        by_method["mean_logodds_clipped"][key] = p0 if mc > 0 else p1 if mc < 0 else "tie"
+        # Hard clipping bounds the influence of a saturated tail but makes two
+        # saturated orders cancel to exactly zero, manufacturing a fresh tie.
+        # tanh is bounded AND strictly monotone, so it damps the tail without
+        # ever discarding its sign.
+        mt = sum(math.tanh(m / clip) for m, _, _ in rows) / len(rows)
+        by_method["mean_tanh"][key] = p0 if mt > 0 else p1 if mt < 0 else "tie"
+        acc = {p0: 0.0, p1: 0.0, "tie": 0.0}
+        for m, lp, f0 in rows:
+            e = {k: math.exp(x) for k, x in lp.items()}
+            z = sum(e.values()) or 1.0
+            acc[p0 if f0 else p1] += e["a"] / z
+            acc[p1 if f0 else p0] += e["b"] / z
+            acc["tie"] += e.get("tie", 0.0) / z
+        by_method["mean_prob"][key] = max(acc, key=acc.get)
+        # diagnostics: split the clipped slot-space margin into signal and bias.
+        # i_first / j_first hold m for the presentations where pair[0] resp.
+        # pair[1] occupied slot A -- the m_i / m_j of the docstring.
+        i_first = [max(-clip, min(clip, lp["a"] - lp["b"]))
+                   for _, lp, f0 in rows if f0]
+        j_first = [max(-clip, min(clip, lp["a"] - lp["b"]))
+                   for _, lp, f0 in rows if not f0]
+        if i_first and j_first:
+            m_i = sum(i_first) / len(i_first)
+            m_j = sum(j_first) / len(j_first)
+            anti.append((m_i - m_j) / 2)      # Delta, positive favours pair[0]
+            sym.append((m_i + m_j) / 2)       # beta, the slot preference
+        for _, lp, _ in rows:
+            top = max(lp, key=lp.get)
+            if top in ("a", "b"):
+                n_dec += 1
+                first_wins += (top == "a")
+    diag = {
+        "n_comparisons": len(comp),
+        "mean_samples": (sum(len(r) for r in comp.values()) / len(comp)) if comp else 0,
+        "clip": clip,
+        "beta_mean": (sum(sym) / len(sym)) if sym else None,
+        "beta_median": median(sym) if sym else None,
+        "signal_abs_mean": (sum(abs(x) for x in anti) / len(anti)) if anti else None,
+        "first_slot_rate": (first_wins / n_dec) if n_dec else None,
+        "n_decisive_samples": n_dec,
+    }
+    return by_method, diag
+
+
+def median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return None if not n else (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2)
+
+
+def judge_block(verdicts, resolved_ties, systems, reps, seed):
+    """Matrix + plausibility + minimality + BT for ONE judge's verdicts.
+
+    Same estimators as the printed primary section, packaged so every judge in
+    the pool gets a comparable block in the artifact instead of only an
+    agreement number. `resolved_ties` are judge-independent structural auto-ties
+    and are shared by all judges.
+    """
+    cnt = defaultdict(lambda: defaultdict(int))
+    wins_half = defaultdict(float)
+    for v in verdicts + resolved_ties:
+        x, y = v["pair"]
+        w = v.get("overall_winner", v.get("winner"))
+        cnt[(x, y)]["n"] += 1
+        if w == "tie":
+            cnt[(x, y)]["tie"] += 1
+            wins_half[(x, y)] += 0.5
+            wins_half[(y, x)] += 0.5
+        else:
+            cnt[(x, y)][w] += 1
+            wins_half[(w, y if w == x else x)] += 1
+
+    matrix = {}
+    for a in systems:
+        for b in systems:
+            if a == b:
+                continue
+            c = cnt.get((a, b) if (a, b) in cnt else (b, a))
+            if not c:
+                continue
+            dec = c["n"] - c["tie"]
+            if not dec:
+                continue
+            p, lo, hi = wilson(c.get(a, 0), dec)
+            matrix[f"{a}|{b}"] = {"win_rate": p, "ci_low": lo, "ci_high": hi,
+                                  "decisive": dec, "n": c["n"], "ties": c["tie"]}
+
+    plaus = defaultdict(lambda: [0, 0])
+    for v in verdicts:
+        for s, yn in (v.get("plausible") or {}).items():
+            plaus[s][1] += 1
+            plaus[s][0] += (yn == "yes")
+    mini = defaultdict(lambda: [0, 0, 0])
+    for v in verdicts:
+        x, y = v["pair"]
+        w = v["minimality_winner"]
+        if w == "tie":
+            mini[x][2] += 1
+            mini[y][2] += 1
+        else:
+            mini[x][1] += 1
+            mini[y][1] += 1
+            mini[w][0] += 1
+
+    bt = fit_bt(wins_half, systems)
+    z = sum(bt.values()) or 1.0
+    pool = [(v["pair"][0], v["pair"][1], v["overall_winner"]) for v in verdicts]
+    pool += [(r["pair"][0], r["pair"][1], "tie") for r in resolved_ties]
+    bt_ci = bootstrap_bt(pool, systems, reps=reps, seed=seed)
+
+    per_system = {}
+    for s in systems:
+        pk, pn = plaus.get(s, [0, 0])
+        mk, mn, mt = mini.get(s, [0, 0, 0])
+        e = {"bt_winrate": bt[s] / z,
+             "bt_ci_low": bt_ci[s][0], "bt_ci_high": bt_ci[s][1]}
+        if pn:
+            p, lo, hi = wilson(pk, pn)
+            e.update(plausible_rate=p, plausible_ci_low=lo,
+                     plausible_ci_high=hi, plausible_n=pn)
+        if mn:
+            p, lo, hi = wilson(mk, mn)
+            e.update(minimality_winrate=p, minimality_ci_low=lo,
+                     minimality_ci_high=hi, minimality_n=mn, minimality_ties=mt)
+        per_system[s] = e
+
+    n_rep = [v.get("n_replicates", 1) for v in verdicts]
+    ties = sum(1 for v in verdicts if v["overall_winner"] == "tie")
+    return {"n_judged": len(verdicts), "matrix": matrix, "per_system": per_system,
+            "tie_rate_judge": ties / len(verdicts) if verdicts else None,
+            "mean_replicates": sum(n_rep) / len(n_rep) if n_rep else None,
+            "max_replicates": max(n_rep) if n_rep else None}
+
+
 def stage_aggregate(args):
     systems = [s["label"] for s in json.load(open(args.systems))]
     raw, resolved = [], []
@@ -499,9 +716,14 @@ def stage_aggregate(args):
     # (pair, item, order), and re-scoring the same comparison twice would
     # double-count it. Dedupe within each judge -- never across judges, whose
     # verdicts are separate measurements and are compared, not pooled.
+    # Orientation is keyed on system_a -- who ACTUALLY sat in slot A -- not on
+    # the `swapped` flag. The flag only inverts a deterministic per-(pair,item)
+    # coin flip seeded by --seed, so two runs with the same flag share a slot
+    # order only while the seed is unchanged. system_a is the observed fact and
+    # needs no such assumption. (Today both agree on every record.)
     def vkey(r):
         return (r.get("judge", MODEL), tuple(r["pair"]), tuple(r["item"]),
-                r.get("swapped", False))
+                r.get("system_a") or r.get("swapped", False))
     # Every run writes a resolved.jsonl for its own item set, so the same
     # structural fact (both-empty, or byte-identical selections) is recorded once
     # per run. Those are properties of the systems, not observations, and
@@ -520,15 +742,44 @@ def stage_aggregate(args):
               f"({len(resolved) - len(uniq_resolved)} duplicate structural facts dropped)")
     resolved = uniq_resolved
 
-    seen, verdicts, repeats, agree = {}, [], 0, 0
+    # A judge may be sampled repeatedly for the same comparison (gpt-oss was run
+    # 16x per comparison). Those are replicates, not duplicates: collapsing them
+    # by "first wins" would throw away 15/16 of the data and pick an arbitrary
+    # sample. Group them and take the majority label per field, which is the
+    # judge's own position with its sampling noise averaged out.
+    groups = defaultdict(list)
     for r in raw:
-        k = vkey(r)
-        if k in seen:
-            repeats += 1
-            agree += (seen[k]["overall_winner"] == r["overall_winner"])
-            continue
-        seen[k] = r
-        verdicts.append(r)
+        groups[vkey(r)].append(r)
+
+    def vote(rs, field):
+        c = Counter(x[field] for x in rs).most_common()
+        return "tie" if len(c) > 1 and c[0][1] == c[1][1] else c[0][0]
+
+    samples = {}       # vkey -> every individual label, before majority voting
+    verdicts, repeats, agree, n_multi = [], 0, 0, 0
+    for k, rs in groups.items():
+        samples[k] = [x["overall_winner"] for x in rs]
+        if len(rs) > 1:
+            n_multi += 1
+            repeats += len(rs) - 1
+            # replicate self-agreement: how often a sample matches the majority
+            m = vote(rs, "overall_winner")
+            agree += sum(1 for x in rs if x["overall_winner"] == m) - 1
+            merged = dict(rs[0])
+            merged["overall_winner"] = m
+            merged["minimality_winner"] = vote(rs, "minimality_winner")
+            plaus = {}
+            for s in rs[0].get("plausible", {}):
+                cc = Counter(x["plausible"][s] for x in rs if s in x.get("plausible", {}))
+                plaus[s] = cc.most_common(1)[0][0] if cc else None
+            merged["plausible"] = plaus
+            merged["n_replicates"] = len(rs)
+            verdicts.append(merged)
+        else:
+            verdicts.append(rs[0])
+    if n_multi:
+        print(f"replicates: {n_multi} comparisons had >1 sample "
+              f"({repeats} extra); majority-voted per field")
     by_judge = defaultdict(list)
     for v in verdicts:
         by_judge[v.get("judge", MODEL)].append(v)
@@ -569,7 +820,7 @@ def stage_aggregate(args):
     by_key = defaultdict(list)
     for v in verdicts:
         by_key[(tuple(v["pair"]), tuple(v["item"]))].append(v)
-    both = [g for g in by_key.values() if len({x["swapped"] for x in g}) == 2]
+    both = [g for g in by_key.values() if len({x.get("system_a") for x in g}) == 2]
     flips = sum(1 for g in both
                 if {x["overall_winner"] for x in g} != {g[0]["overall_winner"]})
     flip_rate = flips / len(both) if both else None
@@ -699,11 +950,11 @@ def stage_aggregate(args):
     # ---- cross-judge agreement on the comparisons both judged
     agreement = {}
     for other in [j for j in by_judge if j != primary]:
-        pk = {(tuple(v["pair"]), tuple(v["item"]), v.get("swapped", False)): v
+        pk = {(tuple(v["pair"]), tuple(v["item"]), v.get("system_a")): v
               for v in by_judge[primary]}
         both = [(pk[k], o) for o in by_judge[other]
                 if (k := (tuple(o["pair"]), tuple(o["item"]),
-                          o.get("swapped", False))) in pk]
+                          o.get("system_a"))) in pk]
         if not both:
             continue
         same = sum(1 for a, b in both if a["overall_winner"] == b["overall_winner"])
@@ -715,6 +966,130 @@ def stage_aggregate(args):
                  for l in labs)
         kappa = (pa - pe) / (1 - pe) if pe < 1 else float("nan")
         agreement[other] = {"n": len(both), "raw_agreement": pa, "kappa": kappa}
+
+        # A judge sampled many times per comparison can be scored as an
+        # ANNOTATOR against the primary, two ways:
+        #   single  -- pool every individual sample against the primary's label.
+        #              "if I ran it once, how often would it match?"
+        #   majority -- the raw_agreement above, on the majority-voted label.
+        #              "if I ran it 8x and took the vote, how often?"
+        # majority >> single means the gap is sampling noise that voting removes;
+        # majority == single means the gap is systematic and voting cannot help.
+        # self_agreement is the noise ceiling: how often two samples of the SAME
+        # comparison agree with each other. Agreement inside the unanimous bucket
+        # is the cleanest read -- there the judge has no noise left to remove.
+        # Per bucket the two rates are kept on the SAME denominator -- the
+        # bucket's comparison count -- so a percentage-point gap converts to a
+        # comparison count by multiplying. `maj_hits` is an integer (voting emits
+        # one label per comparison); `single_expected` is sum(p_i), the number of
+        # comparisons that would match if a single sample were drawn for each.
+        # Their difference is exactly what voting buys or costs in that bucket.
+        hits = tot = 0
+        pair_same = pair_tot = 0
+        B = ("unanimous", "strong", "split")
+        buckets = {k_: {"n": 0, "maj_hits": 0, "single_expected": 0.0,
+                        "n_samples": 0} for k_ in B}
+        # "What if I run it once?" needs a spread, not just the mean. Two reads:
+        #   runs[r]  -- take the r-th sample of every presentation and score that
+        #               as one complete single-run annotator. The observed spread
+        #               over these runs is what re-running the judge would feel
+        #               like. Replicate order is file order, which is arbitrary
+        #               but independent of the primary's label, so this is a fair
+        #               resample rather than a ranking.
+        #   var_p    -- sum p_i(1-p_i), the exact variance of a single random
+        #               draw per presentation. sd = sqrt(var_p)/n. It needs no
+        #               run bookkeeping and is the analytic version of the above.
+        runs = defaultdict(lambda: [0, 0])          # replicate index -> [hits, n]
+        var_p = 0.0
+        for prim, o in both:
+            labs = samples.get((other, tuple(o["pair"]), tuple(o["item"]),
+                                o.get("system_a") or o.get("swapped", False)),
+                               [o["overall_winner"]])
+            gold = prim["overall_winner"]
+            match = sum(1 for l in labs if l == gold)
+            hits += match
+            tot += len(labs)
+            p_i = match / len(labs)
+            var_p += p_i * (1 - p_i)
+            for r, l in enumerate(labs):
+                runs[r][1] += 1
+                runs[r][0] += (l == gold)
+            for i in range(len(labs)):
+                for jx in range(i + 1, len(labs)):
+                    pair_tot += 1
+                    pair_same += (labs[i] == labs[jx])
+            top = Counter(labs).most_common(1)[0][1] / len(labs)
+            b = ("unanimous" if top == 1 else
+                 "strong" if top > 0.5 else "split")
+            v = buckets[b]
+            v["n"] += 1
+            v["maj_hits"] += (o["overall_winner"] == gold)
+            v["single_expected"] += match / len(labs)
+            v["n_samples"] += len(labs)
+        if tot:
+            # Only runs that cover (nearly) every presentation are comparable as
+            # whole annotators; the tail replicates exist for a few hundred
+            # re-submitted presentations and would look artificially extreme on
+            # their own much smaller denominator.
+            n_cmp = len(both)
+            full = [{"run": r, "n": v[1], "agreement": v[0] / v[1]}
+                    for r, v in sorted(runs.items()) if v[1] >= 0.9 * n_cmp]
+            partial = [{"run": r, "n": v[1], "agreement": v[0] / v[1]}
+                       for r, v in sorted(runs.items()) if v[1] < 0.9 * n_cmp]
+            rates = [x["agreement"] for x in full]
+            mean_r = sum(rates) / len(rates) if rates else None
+            sd_r = (math.sqrt(sum((x - mean_r) ** 2 for x in rates) / (len(rates) - 1))
+                    if len(rates) > 1 else None)
+            agreement[other].update(
+                single_sample_agreement=hits / tot,
+                self_agreement=(pair_same / pair_tot) if pair_tot else None,
+                n_samples=tot,
+                single_runs=full, single_runs_partial=partial,
+                single_run_mean=mean_r, single_run_sd=sd_r,
+                single_run_min=min(rates) if rates else None,
+                single_run_max=max(rates) if rates else None,
+                # sd of ONE random draw per presentation, from sum p_i(1-p_i)
+                single_draw_sd=math.sqrt(var_p) / n_cmp if n_cmp else None,
+                by_confidence={k_: dict(v, agreement=v["maj_hits"] / v["n"],
+                                        single=v["single_expected"] / v["n"])
+                               for k_, v in buckets.items() if v["n"]})
+            a_ = agreement[other]
+            # Two decimals: the whole point is whether majority differs from
+            # single at all, and the gap here is under a tenth of a point.
+            print(f"\n=== {other} as an annotator vs {primary} ===")
+            print(f"  single sample     {a_['single_sample_agreement']*100:6.2f}%  "
+                  f"({tot} sample-vs-{primary} pairs)")
+            print(f"  majority vote     {pa*100:6.2f}%  (kappa {kappa:.3f})")
+            if sd_r is not None:
+                print(f"  one whole run     {mean_r*100:6.2f}% +- {sd_r*100:.2f} sd  "
+                      f"(range {a_['single_run_min']*100:.2f}-"
+                      f"{a_['single_run_max']*100:.2f} over {len(rates)} runs; "
+                      f"analytic sd {a_['single_draw_sd']*100:.2f})")
+                print("    per-run: " + "  ".join(f"{x['agreement']*100:.2f}" for x in full))
+                if partial:
+                    print(f"    ({len(partial)} tail replicate(s) omitted: "
+                          + ", ".join(f"n={x['n']}" for x in partial) + ")")
+            if a_['self_agreement'] is not None:
+                print(f"  self-agreement    {a_['self_agreement']*100:6.2f}%  "
+                      f"(noise ceiling: two samples of the same comparison)")
+            for k_, v in a_["by_confidence"].items():
+                print(f"    {k_:10s} n={v['n']:6d}  majority {v['agreement']*100:6.2f}%  "
+                      f"single {v['single']*100:6.2f}%  "
+                      f"({v['maj_hits'] - v['single_expected']:+6.1f} comparisons)")
+            print("  majority ~= single -> the gap is systematic, not sampling noise"
+                  if abs(pa - a_['single_sample_agreement']) < 0.02
+                  else "  majority > single -> voting removes real sampling noise")
+            # The headline near-equality can hide two large opposing effects: a
+            # real gain wherever a majority exists, cancelled by the no-majority
+            # bucket, where vote() emits the literal label "tie" and so almost
+            # always disagrees. Report the has-majority subset so the cancelling
+            # is visible rather than folded into one number.
+            hm = [v for k_, v in a_["by_confidence"].items() if k_ != "split"]
+            if hm and any(v["n"] for v in hm):
+                n_hm = sum(v["n"] for v in hm)
+                print(f"  where a majority exists: n={n_hm}  "
+                      f"majority {100*sum(v['maj_hits'] for v in hm)/n_hm:6.2f}%  "
+                      f"single {100*sum(v['single_expected'] for v in hm)/n_hm:6.2f}%")
         print(f"\nagreement {primary} vs {other}: {100*pa:.1f}% raw "
               f"(kappa={kappa:.3f}) on {len(both)} shared comparisons")
 
@@ -760,7 +1135,85 @@ def stage_aggregate(args):
                "minimality_ci_high": mi_hi, "minimality_n": mn,
                "minimality_ties": mt}
         runs[canon_id.get(s, s)] = {sub: per for sub in SUBSETS}   # pooled fit
+    # ---- logit aggregation for any judge that recorded answer-token distributions
+    # Scored against the primary judge's label, which is the only external
+    # reference available: the point of the exercise is that the sampled-majority
+    # rule manufactures ties the primary judge almost never emits.
+    logit_methods = None
+    lp_judges = sorted({r.get("judge", MODEL) for r in raw
+                        if (r.get("dist") or {}).get("overall", {}).get("logprobs")})
+    if lp_judges:
+        prim_lab = {}
+        for v in by_judge.get(primary, []):
+            prim_lab.setdefault((tuple(v["pair"]), tuple(v["item"])), []).append(
+                v["overall_winner"])
+        prim_lab = {k: Counter(v).most_common(1)[0][0] for k, v in prim_lab.items()}
+        logit_methods = {}
+        for jm in lp_judges:
+            vs = [r for r in raw if r.get("judge", MODEL) == jm
+                  and tuple(r["item"]) in canon]
+            by_method, diag = logit_labels(vs)
+            # the sampled-majority rule as it stands today, per presentation, so
+            # the comparison is against what the pipeline actually does
+            cur = defaultdict(lambda: defaultdict(list))
+            for r in vs:
+                cur[(tuple(r["pair"]), tuple(r["item"]))][
+                    r.get("system_a")].append(r["overall_winner"])
+            def _vote(l):
+                c = Counter(l).most_common()
+                return "tie" if len(c) > 1 and c[0][1] == c[1][1] else c[0][0]
+            by_method["current_per_orientation"] = {
+                k: _vote([_vote(v) for v in slots.values()]) for k, slots in cur.items()}
+            shared = [k for k in by_method["mean_logodds"] if k in prim_lab]
+            rows = []
+            for name, lab in by_method.items():
+                n = len(shared)
+                rows.append({
+                    "method": name,
+                    "n": n,
+                    "agreement": (sum(1 for k in shared if lab[k] == prim_lab[k]) / n
+                                  if n else None),
+                    "tie_rate": (sum(1 for k in shared if lab[k] == "tie") / n
+                                 if n else None),
+                })
+            rows.sort(key=lambda r: -(r["agreement"] or 0))
+            logit_methods[jm] = {
+                "diagnostics": diag, "methods": rows,
+                "primary": primary,
+                "primary_tie_rate": (sum(1 for k in shared if prim_lab[k] == "tie")
+                                     / len(shared)) if shared else None,
+                "recommended": "mean_tanh",
+            }
+            d = diag
+            print(f"\n=== {jm}: logit aggregation over {d['n_comparisons']} comparisons "
+                  f"({d['mean_samples']:.1f} samples each, both orders) ===")
+            print(f"  slot-A win rate {100*d['first_slot_rate']:5.2f}% of "
+                  f"{d['n_decisive_samples']} decisive samples (50% = no slot preference)")
+            print(f"  clipped(+-{d['clip']:.0f}) slot preference beta = "
+                  f"{d['beta_mean']:+.3f} nats, |signal| = {d['signal_abs_mean']:.3f} nats")
+            for r in rows:
+                print(f"    {r['method']:26s} agrees {100*r['agreement']:5.2f}% with "
+                      f"{primary}   emits tie {100*r['tie_rate']:5.2f}%")
+            print(f"    {'(' + primary + ' own tie rate)':26s} "
+                  f"{100*logit_methods[jm]['primary_tie_rate']:33.2f}%")
+
+    res_ties = [r for r in resolved if r.get("winner") == "tie"]
+    per_judge = {}
+    for jm, vs in by_judge.items():
+        per_judge[jm] = judge_block(vs, res_ties, systems,
+                                    args.bootstrap, args.seed)
+        b = per_judge[jm]
+        rank = sorted(systems, key=lambda s: -b["per_system"][s]["bt_winrate"])
+        print(f"\n=== judge {jm}: BT ranking (n={b['n_judged']}, "
+              f"mean {b['mean_replicates']:.1f} sample(s)/comparison) ===")
+        for i, s in enumerate(rank, 1):
+            e = b["per_system"][s]
+            print(f"  {i}. {s:22s} share={e['bt_winrate']*100:5.1f}%  "
+                  f"[{e['bt_ci_low']*100:5.1f},{e['bt_ci_high']*100:5.1f}]")
+
     data = {"judge_model": primary, "effort": EFFORT, "thinking": THINKING["type"],
+            "per_judge": per_judge,
+            "logit_methods": logit_methods,
             "n_judged": len(verdicts), "n_resolved": len(resolved),
             "judges": {j: len(v) for j, v in by_judge.items()},
             "agreement": agreement,
