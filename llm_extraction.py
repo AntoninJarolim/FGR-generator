@@ -126,6 +126,13 @@ class VLLMGenerator:
                     f"for the spans inside --max_gen_tokens ({max_gen_tokens}); "
                     f"constrained outputs are small (~100 tokens) but not free.")
 
+        # fit_prompt gives the passage whatever is left of the context after the
+        # generation budget and TRUNC_MARGIN. If that is <= 0 it truncates EVERY
+        # passage to the empty string and reports no error -- and a constrained
+        # run then builds its span grammar from "", so every sample comes back
+        # with zero spans. Fail loudly instead.
+        self._check_context_budget(max_model_len, max_gen_tokens, "--vllm_max_model_len")
+
         # vLLM does not shard across GPUs on its own -- default to every visible
         # GPU so the run uses two (or more) cards when they are available.
         if tensor_parallel_size is None:
@@ -184,6 +191,11 @@ class VLLMGenerator:
         # targets the real limit rather than our request.
         self.max_model_len = self._resolve_max_model_len(max_model_len)
         print(f"Effective max_model_len for prompt fitting: {self.max_model_len}")
+        # Re-check against what the engine actually settled on: it can cap the
+        # requested context to what fits in the KV cache, which can turn a
+        # healthy budget into a negative one.
+        self._check_context_budget(self.max_model_len, max_gen_tokens,
+                                   "effective max_model_len")
 
         # temperature=0 => greedy (deterministic) decoding.
         sampling_kwargs = dict(
@@ -194,6 +206,25 @@ class VLLMGenerator:
             sampling_kwargs['thinking_token_budget'] = thinking_token_budget
         sampling_kwargs.update(self._reasoning_sampling_kwargs())
         self.sampling_params = SamplingParams(**sampling_kwargs)
+
+    @classmethod
+    def _check_context_budget(cls, max_model_len, max_gen_tokens, source):
+        """Reject a context that leaves no room for the passage.
+
+        ``fit_prompt`` computes the passage budget as
+        ``max_model_len - max_gen_tokens - TRUNC_MARGIN``; at or below zero it
+        keeps zero passage tokens, silently, for every sample.
+        """
+        if not max_model_len:
+            return
+        budget = max_model_len - max_gen_tokens - cls.TRUNC_MARGIN
+        if budget <= 0:
+            raise ValueError(
+                f"{source} ({max_model_len}) leaves no room for the prompt: "
+                f"{max_model_len} - --max_gen_tokens ({max_gen_tokens}) - "
+                f"TRUNC_MARGIN ({cls.TRUNC_MARGIN}) = {budget}. Every passage would be "
+                f"truncated to the empty string and every sample would return no spans. "
+                f"Raise the context or lower --max_gen_tokens.")
 
     def _reasoning_sampling_kwargs(self):
         """Sampling kwargs the reasoning arm needs on EVERY request.
