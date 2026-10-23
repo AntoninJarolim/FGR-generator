@@ -667,30 +667,45 @@ def sleep_with_progress(seconds, description=None):
 
 
 def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_config=None):
-    """Load input records, deciding the source from ``input_name``:
-    the LongEmbed dataset gets its dedicated query/passage join, a
-    ``.json``/``.jsonl`` path is read from disk, and anything else is treated as
-    a HuggingFace dataset id loaded with ``datasets.load_dataset``."""
-    if is_longembed(input_name):
-        records = load_longembed()
-        end = to_sample if to_sample >= 0 else len(records)
-        return records[from_sample:end]
-    elif input_name.endswith('.jsonl'):
+    """Load input records, deciding the source from ``input_name``.
+
+    A ``.json``/``.jsonl`` path is read from disk; the LongEmbed dataset gets its
+    dedicated query/passage join; anything else is treated as a HuggingFace
+    dataset id loaded with ``datasets.load_dataset``.
+
+    The FILE checks come first so that a dataset materialized to disk is read as
+    a file even when its path happens to contain a dataset name.
+
+    ``to_sample < 0`` means "to the end of the data" for every source. Only the
+    LongEmbed branch used to honour that, which left the ``.jsonl`` path
+    returning ZERO records (``from_sample <= line_id < -1`` is never true) and
+    the HuggingFace path silently dropping the last record.
+    """
+    end = to_sample if to_sample >= 0 else None
+
+    if input_name.endswith('.jsonl'):
+        # Stop reading at ``end`` rather than parsing the whole file: a shard of
+        # a large pairs file should not pay for the lines after it.
+        records = []
         with jsonlines.open(input_name, 'r') as f:
-            return [
-                line_obj
-                for line_id, line_obj in enumerate(f)
-                if from_sample <= line_id < to_sample
-            ]
+            for line_id, line_obj in enumerate(f):
+                if end is not None and line_id >= end:
+                    break
+                if line_id >= from_sample:
+                    records.append(line_obj)
+        return records
     elif input_name.endswith('.json'):
         with open(input_name, 'r') as f:
             data = json.load(f)
-            return data[from_sample:to_sample]
+            return data[from_sample:end]
+    elif is_longembed(input_name):
+        records = load_longembed()
+        return records[from_sample:end]
     else:
         from datasets import load_dataset
         dataset = load_dataset(input_name, hf_config, split=hf_split)
         records = [dict(row) for row in dataset]
-        return records[from_sample:to_sample]
+        return records[from_sample:end]
 
 
 def silent_remove(output_data_file):
@@ -876,15 +891,38 @@ def generate_all_batches_fix(data_chunks, generation_api, generated_data_dir, ge
 
 
 def write_output(responses_out, output_data_file, input_data, from_sample):
+    """Pair each response with its input record and write the extracted dataset.
+
+    Rows are emitted in ROW-ID order, so the output follows input order however
+    the batch files happened to be produced.
+
+    Responses whose row id falls outside the loaded slice are skipped rather than
+    indexing off the end of ``input_data`` -- note a negative index would not
+    raise, it would silently pair spans with the WRONG record. This happens
+    whenever several jobs share one generation dir: only a pass that loaded the
+    FULL range can pair them all. The skip count is reported so a silently
+    partial file is impossible to miss.
+    """
     silent_remove(output_data_file)
+    n_written = n_out_of_range = 0
     with jsonlines.open(output_data_file, mode='w') as writer:
-        for in_key, out_selected in responses_out.items():
+        for in_key in sorted(responses_out):
+            index = in_key - from_sample
+            if not 0 <= index < len(input_data):
+                n_out_of_range += 1
+                continue
             writer.write(
                 {
-                    **input_data[in_key - from_sample],
-                    'selected_spans': out_selected.get('spans', [])
+                    **input_data[index],
+                    'selected_spans': responses_out[in_key].get('spans', [])
                 }
             )
+            n_written += 1
+    print(f"Wrote {n_written} rows to {output_data_file}")
+    if n_out_of_range:
+        print(f"Skipped {n_out_of_range} generated rows outside the loaded range "
+              f"[{from_sample}, {from_sample + len(input_data)}). Re-run with "
+              f"--skip_generation over the full range to pair every shard.")
 
 
 def read_out_data(output_data_file):
@@ -1170,7 +1208,11 @@ def main():
     if args.reasoning_parser:
         mode_dir = f"{mode_dir}-reasoning"
     model_name = sanitize_model_name(args.model_name)
-    batch_dir = f"{model_name}_from{args.from_sample}-to{len(input_data)}"
+    # "to" is the END INDEX of the slice, not its length: a shard covering
+    # 100000..110000 must be named _from100000-to110000, not _from100000-to10000.
+    # Identical to the old naming for every from_sample=0 run, so existing
+    # LongEmbed output dirs (and their resume state) are unaffected.
+    batch_dir = f"{model_name}_from{args.from_sample}-to{args.from_sample + len(input_data)}"
     generated_data_dir = os.path.join(args.generate_into_dir, mode_dir, batch_dir)
     if not args.skip_generation:
         # Create output directory and find already generated data if exists
