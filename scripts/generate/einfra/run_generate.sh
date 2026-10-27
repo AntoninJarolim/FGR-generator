@@ -1,18 +1,18 @@
 #!/bin/bash
-cd "$(dirname "$0")/../.."   # scripts/<target>/ -> repo root; all paths below are repo-relative
+cd "$(dirname "$0")/../../.."   # scripts/generate/<target>/ -> repo root; all paths below are repo-relative
 # Generate fine-grained relevance supervision through the e-INFRA CZ
 # OpenAI-compatible API. No GPU needed -- this only sends API requests, but
 # the fgr-generator conda env is still activated so python has the repo deps.
 #
-# Mirrors scripts/local/run_generate_vllm.sh (same dataset, template, psg key, batch size,
+# Mirrors scripts/generate/local/run_generate_vllm.sh (same dataset, template, psg key, batch size,
 # --skip-regeneration) but drops the vLLM engine params, which are meaningless
 # for an API client. The span-not-found regeneration loop is skipped: samples
 # with unmatched spans are only annotated with extraction_error, not re-queried.
 #
 # Usage:
-#   ./scripts/einfra/run_generate.sh                  # full run
-#   ./scripts/einfra/run_generate.sh --dry-run        # only the first 10 samples, overwrite existing
-#   ./scripts/einfra/run_generate.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
+#   ./scripts/generate/einfra/run_generate.sh                  # full run
+#   ./scripts/generate/einfra/run_generate.sh --dry-run        # only the first 10 samples, overwrite existing
+#   ./scripts/generate/einfra/run_generate.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
 # --- Argument parsing ---

@@ -25,7 +25,7 @@ aggregate already reads, tagged by judge so the two can be separated.
 
 The reasoning parser is what keeps the thinking channel out of the JSON that
 guided decoding constrains; `answer_text` then strips the channel framing off
-the completion. See scripts/karolina/run_judge_vllm.sh for the cluster wrapper.
+the completion. See scripts/generate/karolina/run_judge_vllm.sh for the cluster wrapper.
 """
 import argparse
 import json

@@ -3,20 +3,21 @@
 
 ## Scripts
 
-Shell entry points live under `scripts/<where they run>/` and must be invoked
-from the repo root (they `cd` there themselves):
+Generation entry points live under `scripts/generate/<where they run>/`; the
+viewer launcher is `scripts/run_visualize.sh`. All of them `cd` to the repo root
+themselves, so invoke them from anywhere:
 
 | path | runs on | does |
 | --- | --- | --- |
-| `scripts/local/run_generate_vllm.sh` | any GPU box | LongEmbed extraction with in-process vLLM; `--constrained`, `--reasoning`, `--json` |
-| `scripts/local/run_generate_ollama.sh` | any box + Ollama server | the old FDM-evidence runs over Ollama / e-INFRA chat models |
-| `scripts/local/run_visualize.sh` | laptop | the span viewer at http://127.0.0.1:8123/ |
-| `scripts/einfra/run_generate.sh` | any box | LongEmbed extraction through the e-INFRA OpenAI-compatible API (`.env_einfra`) |
-| `scripts/dgx/run_generate_vllm.sh` | MetaCentrum DGX (PBS) | `qsub` wrapper around the local vLLM runner |
-| `scripts/karolina/setup_env.sh` | Karolina login node | one-time conda env on project scratch |
-| `scripts/karolina/run_generate_vllm.sh` | Karolina (Slurm) | `sbatch` wrapper around the local vLLM runner |
-| `scripts/karolina/run_msmarco_vllm.sh` | Karolina (Slurm) | sharded MS MARCO supervision run |
-| `scripts/karolina/run_judge_vllm.sh` | Karolina (Slurm) | gpt-oss pairwise judge |
+| `scripts/generate/local/run_generate_vllm.sh` | any GPU box | LongEmbed extraction with in-process vLLM; `--constrained`, `--reasoning`, `--json` |
+| `scripts/generate/local/run_generate_ollama.sh` | any box + Ollama server | the old FDM-evidence runs over Ollama / e-INFRA chat models |
+| `scripts/run_visualize.sh` | laptop | the span viewer at http://127.0.0.1:8123/ |
+| `scripts/generate/einfra/run_generate.sh` | any box | LongEmbed extraction through the e-INFRA OpenAI-compatible API (`.env_einfra`) |
+| `scripts/generate/dgx/run_generate_vllm.sh` | MetaCentrum DGX (PBS) | `qsub` wrapper around the local vLLM runner |
+| `scripts/generate/karolina/setup_env.sh` | Karolina login node | one-time conda env on project scratch |
+| `scripts/generate/karolina/run_generate_vllm.sh` | Karolina (Slurm) | `sbatch` wrapper around the local vLLM runner |
+| `scripts/generate/karolina/run_msmarco_vllm.sh` | Karolina (Slurm) | sharded MS MARCO supervision run |
+| `scripts/generate/karolina/run_judge_vllm.sh` | Karolina (Slurm) | gpt-oss pairwise judge |
 
 `eval/*.sh` stay next to the Python they drive.
 
@@ -26,7 +27,7 @@ Only produced span data and what is derived from it: raw model responses,
 extracted spans, human spans and `eval/`. Input datasets are never stored there.
 LongEmbed is read from the HF cache; the materialized MS MARCO pairs go to
 `$FGR_PAIRS_DIR/msmarco/` (default `~/.cache/fgr-generator/pairs`, written by
-`prefetch_hf_assets.py --datasets msmarco`, read by `scripts/karolina/run_msmarco_vllm.sh`).
+`prefetch_hf_assets.py --datasets msmarco`, read by `scripts/generate/karolina/run_msmarco_vllm.sh`).
 
 ## Human span annotations (MS MARCO dev-small)
 

@@ -6,7 +6,7 @@ tokenizer used by find_invalid_samples. Run this on a machine WITH internet
 
 Not cluster-specific: the cache location is taken from $HF_HOME (falling back to
 the standard HF default). Select what to fetch with flags; the default model set
-mirrors LARGE_MODELS in scripts/local/run_generate_vllm.sh. Set $HF_TOKEN for gated models.
+mirrors LARGE_MODELS in scripts/generate/local/run_generate_vllm.sh. Set $HF_TOKEN for gated models.
 
 For MS MARCO this does more than warm the cache: it MATERIALIZES the joined
 (query, passage) pairs to $FGR_PAIRS_DIR/msmarco/pairs-<split>.jsonl (default
@@ -30,7 +30,7 @@ import argparse
 import json
 import os
 
-# Mirrors LARGE_MODELS in scripts/local/run_generate_vllm.sh; override with --models.
+# Mirrors LARGE_MODELS in scripts/generate/local/run_generate_vllm.sh; override with --models.
 DEFAULT_MODELS = [
     "google/gemma-4-31B-it",
     "google/gemma-4-26B-A4B-it",
@@ -41,7 +41,7 @@ MODEL_IGNORE = ["*.pth", "*.gguf", "*.bin", "original/*", "consolidated*"]
 AUX_IGNORE = ["*.h5", "*.msgpack", "*.bin", "*.onnx", "tf_model*", "flax*", "rust_model*"]
 
 # Input datasets are cached outside the repo's data/ (which holds only span
-# data). Shared with scripts/karolina/run_msmarco_vllm.sh through $FGR_PAIRS_DIR.
+# data). Shared with scripts/generate/karolina/run_msmarco_vllm.sh through $FGR_PAIRS_DIR.
 DEFAULT_PAIRS_DIR = os.environ.get(
     "FGR_PAIRS_DIR", os.path.expanduser("~/.cache/fgr-generator/pairs"))
 

@@ -1,21 +1,21 @@
 #!/bin/bash
-# Karolina (IT4Innovations) Slurm wrapper around scripts/local/run_generate_vllm.sh for the
+# Karolina (IT4Innovations) Slurm wrapper around scripts/generate/local/run_generate_vllm.sh for the
 # LARGE_MODELS list (gemma-4-31B-it, gemma-4-26B-A4B-it, Qwen3.6-27B).
 #
 # Karolina uses Slurm (NOT PBS/qsub). GPU nodes are 8x A100-40GB and qgpu
 # allows partial-node allocation billed per GPU, so we request only the GPUs we
 # need. Weights and the conda env live on project scratch (home is a 25 GB
 # quota); build them first on the LOGIN node with:
-#     bash scripts/karolina/setup_env.sh
+#     bash scripts/generate/karolina/setup_env.sh
 #     python prefetch_hf_assets.py       # weights + dataset + aux tokenizer (offline prep)
 #
 # Usage:
 #   # Dry run (10 samples/model, both modes) on the 1h experimental queue:
-#   sbatch -p qgpu_exp -t 01:00:00 scripts/karolina/run_generate_vllm.sh --dry-run
+#   sbatch -p qgpu_exp -t 01:00:00 scripts/generate/karolina/run_generate_vllm.sh --dry-run
 #   # Full run (both modes, every large model) on the standard GPU queue:
-#   sbatch scripts/karolina/run_generate_vllm.sh
+#   sbatch scripts/generate/karolina/run_generate_vllm.sh
 #   # One mode, one model -- the readable way to fan out over concurrent jobs:
-#   sbatch scripts/karolina/run_generate_vllm.sh --unconstrained --model Qwen/Qwen3.6-27B
+#   sbatch scripts/generate/karolina/run_generate_vllm.sh --unconstrained --model Qwen/Qwen3.6-27B
 #
 # tensor_parallel_size is forced to 4 (FGR_TP): Qwen3.6-27B has 4 KV heads,
 # which are NOT divisible by 8, so the default TP=(#GPUs)=8 would crash. TP=4
@@ -39,12 +39,12 @@ set -euo pipefail
 # --- Locate the repo -------------------------------------------------------
 # Under Slurm the batch script runs from a spool copy; SLURM_SUBMIT_DIR holds
 # the submission directory. Fall back to the script's dir when run by hand.
-# The script lives in scripts/<target>/; the repo root is two levels up. Under
+# The script lives in scripts/generate/<target>/; the repo root is three levels up. Under
 # the scheduler the script runs from a spool copy, so fall back to the submit
-# dir, which is the repo root if submitted from there or scripts/<target>/ if
+# dir, which is the repo root if submitted from there or scripts/generate/<target>/ if
 # submitted from here -- llm_extraction.py marks the root either way.
-REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../.." && pwd)"
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../../.." && pwd)"
 cd "$REPO_DIR"
 echo "Repo dir: $REPO_DIR"
 echo "Host: $(hostname); Job: ${SLURM_JOB_ID:-none}; GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -73,9 +73,9 @@ RUNNER=bash
 command -v zsh >/dev/null 2>&1 && RUNNER=zsh
 
 # Which decoding passes to run is chosen by flags on the sbatch command line:
-#   sbatch scripts/karolina/run_generate_vllm.sh --constrained      # constrained only
-#   sbatch scripts/karolina/run_generate_vllm.sh --unconstrained    # unconstrained only
-#   sbatch scripts/karolina/run_generate_vllm.sh                    # both (default)
+#   sbatch scripts/generate/karolina/run_generate_vllm.sh --constrained      # constrained only
+#   sbatch scripts/generate/karolina/run_generate_vllm.sh --unconstrained    # unconstrained only
+#   sbatch scripts/generate/karolina/run_generate_vllm.sh                    # both (default)
 # and which models by repeatable --model flags (default: the whole LARGE_MODELS
 # list), e.g. --model google/gemma-4-31B-it. Prefer these flags over the legacy
 # FGR_MODES env var: script arguments are stored in the job record and survive a
@@ -84,7 +84,7 @@ command -v zsh >/dev/null 2>&1 && RUNNER=zsh
 # separate concurrent jobs (each its own 4-GPU allocation) cuts wall-clock at
 # identical per-GPU billing.
 #
-# The mode maps to scripts/local/run_generate_vllm.sh's --constrained flag: constrained adds
+# The mode maps to scripts/generate/local/run_generate_vllm.sh's --constrained flag: constrained adds
 # span-grammar decoding, unconstrained is the bare default. Both use the same
 # long-embed-xml template; outputs land in long-embed-xml{-constrained} dirs.
 MODES=()
@@ -108,7 +108,7 @@ for MODE in "${MODES[@]}"; do   # 1 = constrained (span grammar), 0 = unconstrai
   echo "==================================================================="
   echo "=== Decoding mode $([ "$MODE" -eq 1 ] && echo CONSTRAINED || echo UNCONSTRAINED)  (TP=$FGR_TP) ==="
   echo "==================================================================="
-  "$RUNNER" ./scripts/local/run_generate_vllm.sh \
+  "$RUNNER" ./scripts/generate/local/run_generate_vllm.sh \
       --vllm_tensor_parallel_size "$FGR_TP" \
       "${MODE_FLAG[@]}" \
       "${PASSTHRU_ARGS[@]}"

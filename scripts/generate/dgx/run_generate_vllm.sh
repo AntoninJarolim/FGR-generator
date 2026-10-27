@@ -1,19 +1,19 @@
 #!/bin/bash
-# MetaCentrum (DGX) wrapper around scripts/local/run_generate_vllm.sh.
+# MetaCentrum (DGX) wrapper around scripts/generate/local/run_generate_vllm.sh.
 #
 # Submits as a PBS job that (1) initializes the MetaCentrum environment
 # (modules, scratch, caches), (2) creates/updates the `fgr-generator` conda
 # env from requirements-lock.txt (a pip freeze of the known-working local
 # env; falls back to the unpinned requirements.txt), and (3) runs
-# scripts/local/run_generate_vllm.sh with RUN_EXTREME_MODELS=1 so the EXTREME_MODELS list
+# scripts/generate/local/run_generate_vllm.sh with RUN_EXTREME_MODELS=1 so the EXTREME_MODELS list
 # (Qwen3-235B-A22B-Thinking-2507) is used. llm_extraction.py auto-sets
 # vLLM tensor_parallel_size to the number of allocated GPUs.
 #
 # Usage (from the repo directory on a MetaCentrum frontend, repo on /storage):
-#   qsub scripts/dgx/run_generate_vllm.sh
-#   qsub -q gpu@pbs-m1.metacentrum.cz scripts/dgx/run_generate_vllm.sh   # non-DGX GPU queue
-#   ./scripts/dgx/run_generate_vllm.sh --dry-run     # directly on an interactive GPU node;
-#                                            # extra args are forwarded to scripts/local/run_generate_vllm.sh
+#   qsub scripts/generate/dgx/run_generate_vllm.sh
+#   qsub -q gpu@pbs-m1.metacentrum.cz scripts/generate/dgx/run_generate_vllm.sh   # non-DGX GPU queue
+#   ./scripts/generate/dgx/run_generate_vllm.sh --dry-run     # directly on an interactive GPU node;
+#                                            # extra args are forwarded to scripts/generate/local/run_generate_vllm.sh
 #
 # Tutorial this follows: https://gist.github.com/vlccek/892c5d49fe0ce99a4f62238b15bc1e9d
 # If storage access fails with permission errors on the frontend, run `kinit`.
@@ -32,12 +32,12 @@ set -euo pipefail
 # Under PBS the script runs from a spool copy, so $0 is useless; qsub records
 # the submission directory in PBS_O_WORKDIR. When run by hand, fall back to
 # the script's own directory.
-# The script lives in scripts/<target>/; the repo root is two levels up. Under
+# The script lives in scripts/generate/<target>/; the repo root is three levels up. Under
 # the scheduler the script runs from a spool copy, so fall back to the submit
-# dir, which is the repo root if submitted from there or scripts/<target>/ if
+# dir, which is the repo root if submitted from there or scripts/generate/<target>/ if
 # submitted from here -- llm_extraction.py marks the root either way.
-REPO_DIR="${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../.." && pwd)"
+REPO_DIR="${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../../.." && pwd)"
 cd "$REPO_DIR"
 echo "Repo dir: $REPO_DIR"
 echo "Host: $(hostname); GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
@@ -62,7 +62,7 @@ else
 fi
 
 # --- Conda env: create or sync `fgr-generator` -----------------------------
-# Named env (not --prefix) so scripts/local/run_generate_vllm.sh's `conda activate
+# Named env (not --prefix) so scripts/generate/local/run_generate_vllm.sh's `conda activate
 # fgr-generator` works unchanged. NOTE: the mambaforge module's install lives
 # on read-only AFS, so a named env is NOT created under $CONDA_BASE/envs --
 # conda/mamba falls back to the first WRITABLE entry in envs_dirs (a /storage
@@ -111,9 +111,9 @@ fi
 # --- Run the generation over the extreme-size models -----------------------
 export RUN_EXTREME_MODELS=1
 
-# scripts/local/run_generate_vllm.sh has a zsh shebang but is bash-compatible; MetaCentrum
+# scripts/generate/local/run_generate_vllm.sh has a zsh shebang but is bash-compatible; MetaCentrum
 # nodes are not guaranteed to have zsh, so pick whichever exists.
 RUNNER=bash
 command -v zsh >/dev/null 2>&1 && RUNNER=zsh
 
-"$RUNNER" ./scripts/local/run_generate_vllm.sh "$@"
+"$RUNNER" ./scripts/generate/local/run_generate_vllm.sh "$@"

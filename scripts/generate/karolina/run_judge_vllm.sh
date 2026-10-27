@@ -7,7 +7,7 @@
 # work around a runtime problem -- report the problem instead.
 #
 # Prereqs, both on the LOGIN node (compute nodes are air-gapped):
-#     bash scripts/karolina/setup_env.sh
+#     bash scripts/generate/karolina/setup_env.sh
 #     HF_HOME=/scratch/project/fta-26-64/ajarolim/.cache/huggingface \
 #       python -c "from huggingface_hub import snapshot_download; \
 #                  snapshot_download('openai/gpt-oss-120b', \
@@ -15,10 +15,10 @@
 #
 # Usage:
 #   # Smoke test, 20 comparisons, 1h experimental queue:
-#   sbatch -p qgpu_exp -t 01:00:00 -J fgr-judge-smoke scripts/karolina/run_judge_vllm.sh \
+#   sbatch -p qgpu_exp -t 01:00:00 -J fgr-judge-smoke scripts/generate/karolina/run_judge_vllm.sh \
 #       --limit 20 --tag smoke
 #   # Full run, 16,246 comparisons:
-#   sbatch scripts/karolina/run_judge_vllm.sh
+#   sbatch scripts/generate/karolina/run_judge_vllm.sh
 
 #SBATCH --job-name=fgr-gptoss-judge
 #SBATCH --account=fta-26-64
@@ -34,12 +34,12 @@
 
 set -euo pipefail
 
-# The script lives in scripts/<target>/; the repo root is two levels up. Under
+# The script lives in scripts/generate/<target>/; the repo root is three levels up. Under
 # the scheduler the script runs from a spool copy, so fall back to the submit
-# dir, which is the repo root if submitted from there or scripts/<target>/ if
+# dir, which is the repo root if submitted from there or scripts/generate/<target>/ if
 # submitted from here -- llm_extraction.py marks the root either way.
-REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../.." && pwd)"
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../../.." && pwd)"
 cd "$REPO_DIR"
 echo "Repo dir: $REPO_DIR"
 echo "Host: $(hostname); Job: ${SLURM_JOB_ID:-none}; GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"

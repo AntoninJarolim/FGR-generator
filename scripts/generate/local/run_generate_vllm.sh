@@ -1,5 +1,5 @@
 #!/bin/zsh
-cd "$(dirname "$0")/../.."   # scripts/<target>/ -> repo root; all paths below are repo-relative
+cd "$(dirname "$0")/../../.."   # scripts/generate/<target>/ -> repo root; all paths below are repo-relative
 # Generate fine-grained relevance supervision with NATIVE vLLM offline batched
 # inference. No server and no OPENAI_BASE_URL needed -- this loads the model
 # weights in-process, so it must run on a machine with a GPU.
@@ -11,17 +11,17 @@ cd "$(dirname "$0")/../.."   # scripts/<target>/ -> repo root; all paths below a
 # skips the span-not-found regeneration loop, loops over the models below.
 
 # Usage:
-#   ./scripts/local/run_generate_vllm.sh                  # full run, unconstrained
-#   ./scripts/local/run_generate_vllm.sh --constrained    # span-grammar constrained decoding
-#   ./scripts/local/run_generate_vllm.sh --constrained --reasoning
+#   ./scripts/generate/local/run_generate_vllm.sh                  # full run, unconstrained
+#   ./scripts/generate/local/run_generate_vllm.sh --constrained    # span-grammar constrained decoding
+#   ./scripts/generate/local/run_generate_vllm.sh --constrained --reasoning
 #                                           # reasoning models think first, grammar
 #                                           # engages after </think>; writes to a
 #                                           # separate "-reasoning" dir
-#   ./scripts/local/run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
-#   ./scripts/local/run_generate_vllm.sh --json           # JSON format instead of XML (unconstrained only)
-#   ./scripts/local/run_generate_vllm.sh --model google/gemma-4-31B-it   # just this model, not a whole list
-#   ./scripts/local/run_generate_vllm.sh --model A --model B             # repeatable
-#   ./scripts/local/run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
+#   ./scripts/generate/local/run_generate_vllm.sh --dry-run        # only the first 10 samples, overwrite existing
+#   ./scripts/generate/local/run_generate_vllm.sh --json           # JSON format instead of XML (unconstrained only)
+#   ./scripts/generate/local/run_generate_vllm.sh --model google/gemma-4-31B-it   # just this model, not a whole list
+#   ./scripts/generate/local/run_generate_vllm.sh --model A --model B             # repeatable
+#   ./scripts/generate/local/run_generate_vllm.sh --force_rewrite  # any other arg is passed through to llm_extraction.py
 set -euo pipefail
 
 # --- Argument parsing ---
@@ -138,7 +138,7 @@ else
   THINKING_TOKEN_BUDGET=""
 fi
 
-# On big-GPU machines (e.g. MetaCentrum DGX via scripts/dgx/run_generate_vllm.sh) run
+# On big-GPU machines (e.g. MetaCentrum DGX via scripts/generate/dgx/run_generate_vllm.sh) run
 # the large or extreme models instead of the local-VRAM-sized ones.
 if [ ${#PICKED_MODELS[@]} -gt 0 ]; then
   # One or more --model flags: run exactly those, ignoring the lists above. This

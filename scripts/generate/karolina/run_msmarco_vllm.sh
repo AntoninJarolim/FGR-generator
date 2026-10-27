@@ -3,12 +3,12 @@
 # reason-then-constrain mode: the model thinks freely, then a per-document
 # llguidance substring grammar engages so every span is verbatim.
 #
-# Unlike scripts/local/run_generate_vllm.sh (which hardcodes LongEmbed and a 64K context) this
+# Unlike scripts/generate/local/run_generate_vllm.sh (which hardcodes LongEmbed and a 64K context) this
 # calls llm_extraction.py directly with settings sized for MS MARCO's ~80-token
 # passages, and shards the 532,751-pair train split across concurrent jobs.
 #
 # Prereqs, both on the LOGIN node (compute nodes are air-gapped):
-#     bash scripts/karolina/setup_env.sh
+#     bash scripts/generate/karolina/setup_env.sh
 #     FGR_PAIRS_DIR=/scratch/project/fta-26-64/ajarolim/fgr-pairs \
 #       python prefetch_hf_assets.py --models google/gemma-4-31B-it --datasets msmarco
 # The second command writes $FGR_PAIRS_DIR/msmarco/pairs-{train,validation}.jsonl,
@@ -18,13 +18,13 @@
 #
 # Usage:
 #   # 1k pilot on the 1h experimental queue -- run this FIRST, it sizes the rest:
-#   sbatch -p qgpu_exp -t 01:00:00 -J fgr-msmarco-pilot scripts/karolina/run_msmarco_vllm.sh --pilot
+#   sbatch -p qgpu_exp -t 01:00:00 -J fgr-msmarco-pilot scripts/generate/karolina/run_msmarco_vllm.sh --pilot
 #   # one shard of the full train run (submit all 32 to run concurrently):
-#   sbatch -J fgr-msmarco-s0 scripts/karolina/run_msmarco_vllm.sh --shard 0 --num-shards 32
+#   sbatch -J fgr-msmarco-s0 scripts/generate/karolina/run_msmarco_vllm.sh --shard 0 --num-shards 32
 #   # the small validation split in a single job:
-#   sbatch scripts/karolina/run_msmarco_vllm.sh --split validation
+#   sbatch scripts/generate/karolina/run_msmarco_vllm.sh --split validation
 #   # after all shards finish, build the dataset (CPU only, no GPU needed):
-#   ./scripts/karolina/run_msmarco_vllm.sh --aggregate
+#   ./scripts/generate/karolina/run_msmarco_vllm.sh --aggregate
 #   # anything else is passed straight through to llm_extraction.py
 #
 # Sharding needs NO merge step. Every shard generates into one directory named by
@@ -36,7 +36,7 @@
 #
 # After the pilot, set the token budgets from the measured p99 CoT length:
 #   FGR_MAX_MODEL_LEN=4096 FGR_MAX_GEN_TOKENS=2048 FGR_THINKING_BUDGET=1536 \
-#     FGR_BATCH_SIZE=2048 sbatch scripts/karolina/run_msmarco_vllm.sh --shard 0 --num-shards 32
+#     FGR_BATCH_SIZE=2048 sbatch scripts/generate/karolina/run_msmarco_vllm.sh --shard 0 --num-shards 32
 # The defaults below are the deliberately generous PILOT values; llm_extraction.py
 # refuses a context that leaves no room for the passage, so a bad combination
 # fails fast instead of silently truncating every passage to "".
@@ -55,12 +55,12 @@
 
 set -euo pipefail
 
-# The script lives in scripts/<target>/; the repo root is two levels up. Under
+# The script lives in scripts/generate/<target>/; the repo root is three levels up. Under
 # the scheduler the script runs from a spool copy, so fall back to the submit
-# dir, which is the repo root if submitted from there or scripts/<target>/ if
+# dir, which is the repo root if submitted from there or scripts/generate/<target>/ if
 # submitted from here -- llm_extraction.py marks the root either way.
-REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../.." && pwd)"
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+[ -f "$REPO_DIR/llm_extraction.py" ] || REPO_DIR="$(cd "$REPO_DIR/../../.." && pwd)"
 cd "$REPO_DIR"
 echo "Repo dir: $REPO_DIR"
 echo "Host: $(hostname); Job: ${SLURM_JOB_ID:-none}; GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
