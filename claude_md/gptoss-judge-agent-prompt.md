@@ -43,7 +43,7 @@ data/eval/judge_views/*.jsonl     # 6 files, ~27 MB total, 1200 views each
 
 ## Environment
 
-vLLM plus the repo's light deps (numpy, jsonlines). `karolina_setup_env.sh` in the
+vLLM plus the repo's light deps (numpy, jsonlines). `scripts/karolina/setup_env.sh` in the
 repo root builds the project conda env on IT4I; adapt for your cluster. No GPU is
 needed for anything except the generation itself.
 

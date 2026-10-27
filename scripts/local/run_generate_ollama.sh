@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/../.."   # scripts/<target>/ -> repo root; all paths below are repo-relative
 
 # --- Argument Parsing ---
 EINFRA=0

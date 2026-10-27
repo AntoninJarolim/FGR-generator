@@ -34,7 +34,7 @@ fi
 # `conda` shell function is never defined -- bare `conda activate` would fail
 # with a "run conda init" error. Source conda's profile script to load the
 # function, deriving the base from the on-PATH conda binary so no path is
-# hardcoded (same approach as run_generate_einfra.sh).
+# hardcoded (same approach as scripts/einfra/run_generate.sh).
 if ! command -v conda >/dev/null 2>&1; then
   echo "ERROR: conda not on PATH; cannot activate '$FGR_EVAL_ENV'." >&2
   return 1 2>/dev/null || exit 1
