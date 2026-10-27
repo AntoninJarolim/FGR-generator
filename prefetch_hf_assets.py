@@ -9,10 +9,12 @@ the standard HF default). Select what to fetch with flags; the default model set
 mirrors LARGE_MODELS in run_generate_vllm.sh. Set $HF_TOKEN for gated models.
 
 For MS MARCO this does more than warm the cache: it MATERIALIZES the joined
-(query, passage) pairs to data/msmarco/pairs-<split>.jsonl. The BEIR corpus is
-8.8M passages, so re-joining it inside every sharded generation job would cost
+(query, passage) pairs to $FGR_PAIRS_DIR/msmarco/pairs-<split>.jsonl (default
+~/.cache/fgr-generator/pairs; --pairs-dir overrides). The BEIR corpus is 8.8M
+passages, so re-joining it inside every sharded generation job would cost
 several GB of RAM and minutes each time. Generation then reads slices of the
-jsonl instead.
+jsonl instead. The pairs are an input-dataset cache, which is why they live
+beside the HF cache and NOT under data/: data/ holds only produced span data.
 
 Usage:
   # everything for the 3 large models, into $HF_HOME:
@@ -38,7 +40,10 @@ DEFAULT_MODELS = [
 MODEL_IGNORE = ["*.pth", "*.gguf", "*.bin", "original/*", "consolidated*"]
 AUX_IGNORE = ["*.h5", "*.msgpack", "*.bin", "*.onnx", "tf_model*", "flax*", "rust_model*"]
 
-MSMARCO_OUT_DIR = "data/msmarco"
+# Input datasets are cached outside the repo's data/ (which holds only span
+# data). Shared with karolina_run_msmarco_vllm.sh through $FGR_PAIRS_DIR.
+DEFAULT_PAIRS_DIR = os.environ.get(
+    "FGR_PAIRS_DIR", os.path.expanduser("~/.cache/fgr-generator/pairs"))
 
 
 def materialize_msmarco(splits, out_dir, min_score):
@@ -72,7 +77,11 @@ def main():
     ap.add_argument("--datasets", nargs="*", choices=["longembed", "msmarco"],
                     default=["longembed"],
                     help="Input datasets to prepare (default: longembed). 'msmarco' also "
-                         "materializes the joined pairs to data/msmarco/.")
+                         "materializes the joined pairs under --pairs-dir.")
+    ap.add_argument("--pairs-dir", default=DEFAULT_PAIRS_DIR,
+                    help="where materialized pairs go, as <pairs-dir>/<dataset>/"
+                         "pairs-<split>.jsonl (default: $FGR_PAIRS_DIR or "
+                         "~/.cache/fgr-generator/pairs).")
     ap.add_argument("--no-dataset", dest="datasets", action="store_const", const=[],
                     help="Prepare no dataset at all.")
     ap.add_argument("--msmarco-splits", nargs="*", default=None,
@@ -115,7 +124,7 @@ def main():
         print("=== dataset: MS MARCO (BEIR) ===", flush=True)
         from custom_utils.msmarco import DEFAULT_SPLITS
         splits = args.msmarco_splits if args.msmarco_splits is not None else DEFAULT_SPLITS
-        materialize_msmarco(splits, MSMARCO_OUT_DIR, args.min_score)
+        materialize_msmarco(splits, os.path.join(args.pairs_dir, "msmarco"), args.min_score)
 
     print("PREFETCH DONE", flush=True)
 

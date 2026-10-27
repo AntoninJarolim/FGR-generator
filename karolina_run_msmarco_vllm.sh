@@ -9,9 +9,12 @@
 #
 # Prereqs, both on the LOGIN node (compute nodes are air-gapped):
 #     bash karolina_setup_env.sh
-#     python prefetch_hf_assets.py --models google/gemma-4-31B-it --datasets msmarco
-# The second command writes data/msmarco/pairs-{train,validation}.jsonl, which is
-# what this script slices. It must exist before submitting.
+#     FGR_PAIRS_DIR=/scratch/project/fta-26-64/ajarolim/fgr-pairs \
+#       python prefetch_hf_assets.py --models google/gemma-4-31B-it --datasets msmarco
+# The second command writes $FGR_PAIRS_DIR/msmarco/pairs-{train,validation}.jsonl,
+# which is what this script slices. It must exist before submitting. The pairs
+# are an input-dataset cache and deliberately live on scratch next to the HF
+# cache, not under data/ (data/ holds only produced span data, nothing else).
 #
 # Usage:
 #   # 1k pilot on the 1h experimental queue -- run this FIRST, it sizes the rest:
@@ -60,6 +63,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv || true
 
 FGR_SCRATCH="/scratch/project/fta-26-64/ajarolim"
 export HF_HOME="${HF_HOME:-$FGR_SCRATCH/.cache/huggingface}"
+export FGR_PAIRS_DIR="${FGR_PAIRS_DIR:-$FGR_SCRATCH/fgr-pairs}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export CONDA_ENVS_PATH="$FGR_SCRATCH/.conda/envs"
 export CONDA_PKGS_DIRS="$FGR_SCRATCH/.conda/pkgs"
@@ -100,10 +104,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-PAIRS_FILE="data/msmarco/pairs-${SPLIT}.jsonl"
+PAIRS_FILE="$FGR_PAIRS_DIR/msmarco/pairs-${SPLIT}.jsonl"
 if [ ! -f "$PAIRS_FILE" ]; then
   echo "ERROR: $PAIRS_FILE missing. Materialize it on a LOGIN node first:" >&2
-  echo "  python prefetch_hf_assets.py --models --datasets msmarco" >&2
+  echo "  FGR_PAIRS_DIR=$FGR_PAIRS_DIR python prefetch_hf_assets.py --models --datasets msmarco" >&2
   exit 1
 fi
 TOTAL=$(wc -l < "$PAIRS_FILE")

@@ -1,6 +1,14 @@
 # Fine-Grained Relevancy generator
 
 
+## What goes in `data/`
+
+Only produced span data and what is derived from it: raw model responses,
+extracted spans, human spans and `eval/`. Input datasets are never stored there.
+LongEmbed is read from the HF cache; the materialized MS MARCO pairs go to
+`$FGR_PAIRS_DIR/msmarco/` (default `~/.cache/fgr-generator/pairs`, written by
+`prefetch_hf_assets.py --datasets msmarco`, read by `karolina_run_msmarco_vllm.sh`).
+
 ## Human span annotations (MS MARCO dev-small)
 
 `data/human/msmarco-spans.jsonl` is a copy of the merged human dataset from the

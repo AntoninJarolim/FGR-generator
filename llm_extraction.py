@@ -716,8 +716,8 @@ def read_input_data(input_name, from_sample, to_sample, hf_split='train', hf_con
     as a HuggingFace dataset id loaded with ``datasets.load_dataset``.
 
     The FILE checks come first on purpose: the materialized MS MARCO pairs live at
-    ``data/msmarco/pairs-train.jsonl``, whose path contains "msmarco", so a
-    name-based check running first would send the file to the HF loader.
+    ``$FGR_PAIRS_DIR/msmarco/pairs-train.jsonl``, whose path contains "msmarco",
+    so a name-based check running first would send the file to the HF loader.
 
     ``to_sample < 0`` means "to the end of the data" for every source. Only the
     LongEmbed branch used to honour that, which left the ``.jsonl`` path
