@@ -1113,7 +1113,7 @@ def get_args():
                              "This is also how a run RESUMES: the row ids already present "
                              "in the output dir are skipped instead of regenerated.")
     parser.add_argument("--skip_output", action='store_true',
-                        help="Generate only; do not write data/extracted_relevancy. Use "
+                        help="Generate only; do not write data/extracted_spans. Use "
                              "for sharded jobs sharing a --run_tag dir, which would "
                              "otherwise all truncate and rewrite the same output file "
                              "concurrently. Aggregate afterwards with --skip_generation "
@@ -1127,7 +1127,7 @@ def get_args():
                         help="Split to load when --input_data_name is a HuggingFace dataset.")
     parser.add_argument('--hf_config', type=str, default=None,
                         help="Config/subset name when --input_data_name is a HuggingFace dataset.")
-    parser.add_argument('--generate_into_dir', type=str, default="data/generated",
+    parser.add_argument('--generate_into_dir', type=str, default="data/raw_responses",
                         help="Directory for storing raw LLM batch outputs and their fixes.")
     parser.add_argument('--template_file', type=str, default='templates/long-embed-json.template',
                         help="Base path to the prompt template. Both '<base>-system.template' "
@@ -1326,7 +1326,7 @@ def main():
     responses_out = get_all_responses(generated_data_dir)
 
     # Remove file if exists
-    output_data_file = f"data/extracted_relevancy/{mode_dir}/{batch_dir}.jsonl"
+    output_data_file = f"data/extracted_spans/{mode_dir}/{batch_dir}.jsonl"
     os.makedirs(os.path.dirname(output_data_file), exist_ok=True)
 
     print(f"Saving output data to {output_data_file}")

@@ -3,7 +3,7 @@
 The human data lives in the ``explaining-ms-marco`` repo as ONE merged file,
 ``data/spans/merged/spans.jsonl`` (regenerated there with
 ``python annotation_stats.py --write``). A copy is kept at
-``data/human/msmarco-spans.jsonl``; refresh it by copying, never by editing.
+``data/human_spans/msmarco-spans.jsonl``; refresh it by copying, never by editing.
 
 One merged row per (qid, psgid)::
 

@@ -35,7 +35,7 @@ sets $PYTHON, so no path is hardcoded:
 
     source eval/eval_env.sh
     $PYTHON eval/retrieval_score.py --stage corpus
-    $PYTHON eval/retrieval_score.py --stage score --system data/extracted_relevancy/long-embed-xml-constrained/google~gemma-4-12B-it_from0-to12612.jsonl
+    $PYTHON eval/retrieval_score.py --stage score --system data/extracted_spans/long-embed-xml-constrained/google~gemma-4-12B-it_from0-to12612.jsonl
     $PYTHON eval/retrieval_score.py --stage score --system baseline:random
     $PYTHON eval/retrieval_score.py --stage aggregate
 
@@ -79,7 +79,7 @@ CACHE_DIR = os.path.join(REPO_ROOT, "data/eval/retrieval_cache")
 ROWS_DIR = os.path.join(REPO_ROOT, "data/eval/retrieval_rows")
 DEFAULT_BUDGETS = os.path.join(REPO_ROOT, "data/eval/span_budgets.json")
 DEFAULT_JSON_OUT = os.path.join(REPO_ROOT, "data/eval/retrieval_score.json")
-DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_relevancy")
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_spans")
 
 _WORD = re.compile(r"[a-z0-9]+")
 _SENT = re.compile(r"[^.!?\n]*[.!?\n]+|[^.!?\n]+$")

@@ -38,7 +38,7 @@ Run in the pylate env (any env with numpy works):
 
     source eval/eval_env.sh
     $PYTHON eval/heuristic_spans.py --all-unconstrained
-    $PYTHON eval/heuristic_spans.py data/extracted_relevancy/long-embed-xml/*.jsonl
+    $PYTHON eval/heuristic_spans.py data/extracted_spans/long-embed-xml/*.jsonl
 """
 import argparse
 import glob
@@ -53,7 +53,7 @@ sys.path.insert(0, REPO_ROOT)
 from custom_utils.span_match import locate_span, normalize_with_map  # noqa: E402
 from eval.answer_containment import parse_spans_field, run_key  # noqa: E402
 
-DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_relevancy")
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_spans")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "data/eval/heuristic_spans")
 
 #: Only these arms need the pass; a constrained arm's spans are already verbatim.

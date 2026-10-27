@@ -58,9 +58,9 @@ fi
 # is orthogonal and set by the single --constrained flag, passed straight to
 # llm_extraction.py, which both triggers the span-grammar machinery and routes
 # output to the "-constrained" dir:
-#   * default (unconstrained): free decoding -> data/extracted_relevancy/long-embed-xml/
+#   * default (unconstrained): free decoding -> data/extracted_spans/long-embed-xml/
 #   * --constrained: per-document substring grammar, every span guaranteed
-#     verbatim -> data/extracted_relevancy/long-embed-xml-constrained/
+#     verbatim -> data/extracted_spans/long-embed-xml-constrained/
 TEMPLATE_FILE="templates/long-embed-xml.template"
 if [ "$JSON_FORMAT" -eq 1 ]; then
   # The span grammar is a substring grammar over the XML span format; there is
@@ -73,7 +73,7 @@ if [ "$JSON_FORMAT" -eq 1 ]; then
     exit 1
   fi
   TEMPLATE_FILE="templates/long-embed-json.template"
-  echo "JSON format: writing to data/extracted_relevancy/long-embed-json/."
+  echo "JSON format: writing to data/extracted_spans/long-embed-json/."
 fi
 
 MODE_ARGS=()

@@ -21,7 +21,7 @@ Groups: "All datasets" plus each subset, in file order.
 
 Also runnable directly to print the tables in the terminal:
 
-    python visualize/stats.py                       # every file under data/extracted_relevancy
+    python visualize/stats.py                       # every file under data/extracted_spans
     python visualize/stats.py path/to/output.jsonl  # specific file(s)
     python visualize/stats.py --no-cache ...        # force recomputation
 
@@ -174,7 +174,7 @@ def _new_acc():
 VIZ_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(VIZ_DIR)
 CACHE_DIR = os.path.join(VIZ_DIR, ".cache")
-DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_relevancy")
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_spans")
 
 
 def _cache_path(path, data_dir):

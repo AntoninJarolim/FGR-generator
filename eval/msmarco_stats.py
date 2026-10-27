@@ -7,7 +7,7 @@ Run from the repo root:  python eval/msmarco_stats.py
 """
 import json, numpy as np, collections, os
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-B="data/extracted_relevancy/ms-marco-xml-constrained-reasoning/google~gemma-4-31B-it_"
+B="data/extracted_spans/ms-marco-xml-constrained-reasoning/google~gemma-4-31B-it_"
 W=lambda s: len(s.split())
 res={}
 os.makedirs("figs/msmarco_supervision", exist_ok=True)

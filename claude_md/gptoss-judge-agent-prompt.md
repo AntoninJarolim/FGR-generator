@@ -26,7 +26,7 @@ made to run, stop and report back rather than swapping in another model.
 
 ## What to copy to the cluster
 
-Only **27 MB**. Do **not** copy `data/extracted_relevancy/` — those are six 3.6 GB
+Only **27 MB**. Do **not** copy `data/extracted_spans/` — those are six 3.6 GB
 files and they are not needed; the spans have already been rendered into views.
 
 ```

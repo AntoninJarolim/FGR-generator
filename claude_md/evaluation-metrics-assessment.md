@@ -141,7 +141,7 @@ Selection rule: rank by pairwise Bradley–Terry (human-anchored); require the w
 
 ## 4. Data problems to fix BEFORE running any metric
 
-From the full-data audit (all numbers verified on `data/extracted_relevancy/long-embed-*`):
+From the full-data audit (all numbers verified on `data/extracted_spans/long-embed-*`):
 
 1. **unc-Ministral: 100% empty raw generations** (12,612/12,612) — re-run or drop that arm; scope hallucination/format-tax claims to gemma-12B and E4B.
 2. **Empty span lists**: con-12B 15.4%, con-Ministral 9.3%, con-E4B 3.6%; 18.6% of pairs lack at least one constrained system's output. Decide the policy once (sufficiency=0; "both useless" allowed in pairwise; in the ablation retrieval metric empties auto-score zero drop, which is the correct penalty) and apply it uniformly.

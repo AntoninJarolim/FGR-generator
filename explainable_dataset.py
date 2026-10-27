@@ -119,7 +119,7 @@ if __name__ == "__main__":
     # file_path = 'data/triplets_explained.jsonl'
 
     dataset_name  = 'gemma3:4b_from0-to185'
-    file_path = f'data/extracted_relevancy/{dataset_name}.jsonl'
+    file_path = f'data/extracted_spans/{dataset_name}.jsonl'
 
     tokenizer = AutoTokenizer.from_pretrained('xlm-roberta-base')
     dataset = ExplanationsDataset(

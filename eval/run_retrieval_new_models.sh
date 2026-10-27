@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 # paths here -- machine-local bits like HF_HOME go in the gitignored .env_eval.
 source "$(dirname "$0")/eval_env.sh"
 PY="$PYTHON"
-LE=data/extracted_relevancy/long-embed-xml-constrained
+LE=data/extracted_spans/long-embed-xml-constrained
 NQA_FRAC=0.2
 
 GPU0_SYSTEMS=(

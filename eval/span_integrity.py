@@ -34,8 +34,8 @@ Usage:
   MODE=ms-marco-xml-constrained-reasoning
   RUN=google~gemma-4-31B-it_train
   python eval/span_integrity.py \
-      --generated-dir data/generated/$MODE/$RUN \
-      --extracted data/extracted_relevancy/$MODE/$RUN.jsonl \
+      --generated-dir data/raw_responses/$MODE/$RUN \
+      --extracted data/extracted_spans/$MODE/$RUN.jsonl \
       --tokenizer google/gemma-4-31B-it \
       --thinking-budget 3072
 """
@@ -234,7 +234,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--generated-dir', required=True,
-                    help="Raw batch-file dir for the pilot run (under data/generated/).")
+                    help="Raw batch-file dir for the pilot run (under data/raw_responses/).")
     ap.add_argument('--extracted', required=True,
                     help="Extracted jsonl for the same run.")
     ap.add_argument('--tokenizer', default=None,

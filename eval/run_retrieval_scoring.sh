@@ -17,8 +17,8 @@ cd "$(dirname "$0")/.."
 # paths here -- machine-local bits like HF_HOME go in the gitignored .env_eval.
 source "$(dirname "$0")/eval_env.sh"
 PY="$PYTHON"
-CON=data/extracted_relevancy/long-embed-xml-constrained
-UNC=data/extracted_relevancy/long-embed-xml
+CON=data/extracted_spans/long-embed-xml-constrained
+UNC=data/extracted_spans/long-embed-xml
 
 # Constrained systems + the three trivial floors. The unconstrained arms are
 # omitted from the default run (they serve the hallucination/format-tax story,

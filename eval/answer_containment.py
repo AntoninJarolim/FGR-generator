@@ -56,7 +56,7 @@ MODES = ("long-embed-json", "long-embed-xml", "long-embed-xml-constrained",
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(EVAL_DIR, ".cache")
-DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_relevancy")
+DEFAULT_DATA_DIR = os.path.join(REPO_ROOT, "data/extracted_spans")
 DEFAULT_GOLD = os.path.join(REPO_ROOT, "data/eval/gold_answers.jsonl")
 DEFAULT_JSON_OUT = os.path.join(REPO_ROOT, "data/eval/answer_containment.json")
 

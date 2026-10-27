@@ -2,7 +2,7 @@
 """Local viewer for extracted-relevancy outputs.
 
 Serves ``visualize/static/index.html`` plus a small JSON API over the
-``*.jsonl`` files under ``--data-dir`` (default ``data/extracted_relevancy``),
+``*.jsonl`` files under ``--data-dir`` (default ``data/extracted_spans``),
 one self-contained record per line.
 
 Pages: ``/`` dashboard, ``/viz`` data viewer, ``/stats`` span mismatch stats,
@@ -504,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global REGISTRY, GOLD_PATH, BUDGETS_PATH
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_relevancy"),
+    parser.add_argument("--data-dir", default=os.path.join(REPO_ROOT, "data/extracted_spans"),
                         help="Directory scanned (recursively) for *.jsonl output files.")
     parser.add_argument("--exclude", default="superseded,json-constrained",
                         help="Comma-separated substrings; skip any file whose path (relative to "

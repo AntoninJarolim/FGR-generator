@@ -6,7 +6,7 @@
 # Usage:
 #   ./run_visualize.sh                 # serve http://127.0.0.1:8123/
 #   ./run_visualize.sh --port 9000
-#   ./run_visualize.sh --data-dir data/extracted_relevancy
+#   ./run_visualize.sh --data-dir data/extracted_spans
 set -euo pipefail
 
 # Same conda bootstrapping as run_generate_vllm.sh: non-interactive shells do
