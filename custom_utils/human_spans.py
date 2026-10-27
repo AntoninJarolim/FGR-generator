@@ -1,7 +1,7 @@
 """Human span annotations for MS MARCO dev-small, in the pipeline's record shape.
 
 The human data lives in the ``explaining-ms-marco`` repo as ONE merged file,
-``annotate_data_merged/spans.jsonl`` (regenerated there with
+``data/spans/merged/spans.jsonl`` (regenerated there with
 ``python annotation_stats.py --write``). A copy is kept at
 ``data/human/msmarco-spans.jsonl``; refresh it by copying, never by editing.
 

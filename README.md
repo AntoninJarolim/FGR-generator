@@ -4,7 +4,7 @@
 ## Human span annotations (MS MARCO dev-small)
 
 `data/human/msmarco-spans.jsonl` is a copy of the merged human dataset from the
-`explaining-ms-marco` repo (`annotate_data_merged/spans.jsonl`): 319 query-passage
+`explaining-ms-marco` repo (`data/spans/merged/spans.jsonl`): 319 query-passage
 pairs, one row per pair, every annotator's highlighted spans as character
 offsets. Refresh it by copying that file; do not edit it here.
 
