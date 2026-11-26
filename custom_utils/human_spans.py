@@ -39,7 +39,7 @@ import collections
 import json
 import os
 
-DEFAULT_PATH = os.path.join("data", "human", "msmarco-spans.jsonl")
+DEFAULT_PATH = os.path.join("data", "human_spans", "msmarco-spans.jsonl")
 SPLIT = "validation"
 
 
