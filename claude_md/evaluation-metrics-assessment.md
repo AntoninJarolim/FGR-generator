@@ -85,7 +85,7 @@ Mandatory controls (all cheap, all standard, all already in `human-preference-ev
 
 **Also run the additive direction (A) at a matched token budget** — the infrastructure is identical, and (A)+(B) together are the retrieval analog of ERASER sufficiency + comprehensiveness: (A) is where the discrimination will actually come from, (B) validates the "if removed, no longer relevant" claim. If (A) is run, its own controls apply: random same-length spans, lead-k, BM25-top-sentences at the same budget, symmetric replacement of *all* corpus docs, common token budget across systems, Recall@10/MRR alongside NDCG@10, and an explicit statement of the query-leakage caveat (Dense X / doc2query index query-*agnostic* units; ours are query-conditioned by design).
 
-**Feasibility:** everything local — LongEmbed corpora/queries/qrels in `~/.hfcache`, BEIR-style NDCG@10 pipeline in `/mnt/data/ijarolim/pylate-fgr` (`longembed_data.py`, `retrieve.py`, `benchmarks.py`). The ablation variant additionally needs the per-(query,doc) embedding swap and a ±N-chars window extractor (~20 lines; offsets recoverable via `passage.find`).
+**Feasibility:** everything local — LongEmbed corpora/queries/qrels in `~/.hfcache`, BEIR-style NDCG@10 pipeline in `/mnt/data/ijarolim/fgr-colbert/pylate-fgr` (`longembed_data.py`, `retrieve.py`, `benchmarks.py`). The ablation variant additionally needs the per-(query,doc) embedding swap and a ±N-chars window extractor (~20 lines; offsets recoverable via `passage.find`).
 
 ### 1.5 Cross-encoder score — span-vs-span only
 
